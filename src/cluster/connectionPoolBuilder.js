@@ -92,8 +92,15 @@ module.exports = ({
 
         const randomBroker = list[index++ % list.length]
 
-        host = randomBroker.split(':')[0]
-        port = Number(randomBroker.split(':')[1])
+        // awhittier: Works for server:9902, 10.1.2.3:9902, and ::1:9902.
+        const lastColonIdx = randomBroker.lastIndexOf(':')
+        if (lastColonIdx === -1 || lastColonIdx === randomBroker.length - 1) {
+          throw new KafkaJSNonRetriableError(
+            `Failed to connect: host ${randomBroker} did not contain a host and port separated by a colon`
+          )
+        }
+        host = randomBroker.substring(0, lastColonIdx)
+        port = Number(randomBroker.substring(lastColonIdx + 1))
       }
 
       return new ConnectionPool({

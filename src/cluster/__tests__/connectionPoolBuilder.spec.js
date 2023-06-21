@@ -39,6 +39,64 @@ describe('Cluster > ConnectionBuilder', () => {
     expect(connectionPool.socketFactory).toBe(socketFactory)
   })
 
+  test('creates a new connection using an ipv6 broker', async () => {
+    builder = connectionPoolBuilder({
+      socketFactory,
+      brokers: ['::1:7780'],
+      ssl,
+      sasl,
+      clientId,
+      connectionTimeout,
+      logger,
+    })
+    const connectionPool = await builder.build()
+    expect(connectionPool).toBeInstanceOf(ConnectionPool)
+    expect(connectionPool.host).toEqual('::1')
+    expect(connectionPool.port).toEqual(7780)
+    expect(connectionPool.ssl).toEqual(ssl)
+    expect(connectionPool.sasl).toEqual(sasl)
+    expect(connectionPool.clientId).toEqual(clientId)
+    expect(connectionPool.connectionTimeout).toEqual(connectionTimeout)
+    expect(connectionPool.logger).not.toBeFalsy()
+    expect(connectionPool.socketFactory).toBe(socketFactory)
+  })
+
+  it('throws an exception if only a hostname is specified', async () => {
+    await expect(
+      connectionPoolBuilder({
+        socketFactory,
+        brokers: ['host.test'],
+        ssl,
+        sasl,
+        clientId,
+        connectionTimeout,
+        logger,
+      }).build()
+    ).rejects.toEqual(
+      new KafkaJSNonRetriableError(
+        'Failed to connect: host host.test did not contain a host and port separated by a colon'
+      )
+    )
+  })
+
+  it('throws an exception if port is missing', async () => {
+    await expect(
+      connectionPoolBuilder({
+        socketFactory,
+        brokers: ['host.test:'],
+        ssl,
+        sasl,
+        clientId,
+        connectionTimeout,
+        logger,
+      }).build()
+    ).rejects.toEqual(
+      new KafkaJSNonRetriableError(
+        'Failed to connect: host host.test: did not contain a host and port separated by a colon'
+      )
+    )
+  })
+
   test('when called without host and port iterates throught the seed brokers', async () => {
     const connections = []
     for (let i = 0; i < brokers.length; i++) {

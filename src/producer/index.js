@@ -40,6 +40,7 @@ module.exports = ({
   instrumentationEmitter: rootInstrumentationEmitter,
 }) => {
   let connectionStatus = CONNECTION_STATUS.DISCONNECTED
+  let retryEnabled = false
   retry = retry || { retries: idempotent ? Number.MAX_SAFE_INTEGER : 5 }
 
   if (idempotent && retry.retries < 1) {
@@ -73,6 +74,7 @@ module.exports = ({
     idempotent,
     retrier,
     getConnectionStatus: () => connectionStatus,
+    getRetryEnabled: () => retryEnabled,
   })
 
   let transactionalEosManager
@@ -216,6 +218,7 @@ module.exports = ({
      * @returns {Promise}
      */
     connect: async () => {
+      retryEnabled = true
       await cluster.connect()
       connectionStatus = CONNECTION_STATUS.CONNECTED
       instrumentationEmitter.emit(CONNECT)
@@ -228,6 +231,7 @@ module.exports = ({
      * @return {Promise}
      */
     disconnect: async () => {
+      retryEnabled = false
       connectionStatus = CONNECTION_STATUS.DISCONNECTING
       await cluster.disconnect()
       connectionStatus = CONNECTION_STATUS.DISCONNECTED
