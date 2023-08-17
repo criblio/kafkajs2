@@ -244,7 +244,7 @@ module.exports = ({
     }
 
     const onCrash = async e => {
-      logger.error(`Crash: ${e.name}: ${e.message}`, {
+      logger.error(`Error: ${e.name}: ${e.message}`, {
         groupId,
         retryCount: e.retryCount,
         stack: e.stack,
