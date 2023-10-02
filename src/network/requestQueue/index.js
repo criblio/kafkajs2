@@ -208,7 +208,7 @@ module.exports = class RequestQueue extends EventEmitter {
     if (socketRequest) {
       socketRequest.completed({ size, payload })
     } else {
-      this.logger.warn(`Response without match`, {
+      this.logger.debug(`Response without match`, {
         clientId: this.clientId,
         broker: this.broker,
         correlationId,
