@@ -99,7 +99,7 @@ describe('Network > Connection', () => {
       expect(connection.socket.unref).toHaveBeenCalled()
     })
 
-    test(`clean up connection\'s internal state on disconnect`, async () => {
+    test(`clean up connection's internal state on disconnect`, async () => {
       connection = new Connection(
         connectionOpts({
           requestTimeout: 50,
