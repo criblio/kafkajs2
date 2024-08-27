@@ -271,6 +271,11 @@ module.exports = class Connection {
     await this.requestQueue.waitForPendingRequests()
     this.requestQueue.destroy()
 
+    this.bytesNeeded = Decoder.int32Size()
+    this.bytesBuffered = 0
+    this.chunks = []
+    this.correlationId = 0
+
     if (this.socket) {
       this.socket.end()
       this.socket.unref()

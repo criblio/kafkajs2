@@ -98,6 +98,62 @@ describe('Network > Connection', () => {
       expect(connection.socket.end).toHaveBeenCalled()
       expect(connection.socket.unref).toHaveBeenCalled()
     })
+
+    test(`clean up connection's internal state on disconnect`, async () => {
+      connection = new Connection(
+        connectionOpts({
+          requestTimeout: 50,
+          enforceRequestTimeout: true,
+        })
+      )
+
+      expect(connection.bytesBuffered).toEqual(0)
+      expect(connection.bytesNeeded).toEqual(Decoder.int32Size())
+      expect(connection.chunks.length).toEqual(0)
+      expect(connection.correlationId).toEqual(0)
+
+      const originalProcessData = connection.processData
+      let partialData, remainderBuffer
+      connection.processData = async data => {
+        partialData = data.subarray(0, 4)
+        remainderBuffer = data.subarray(4)
+        originalProcessData.apply(connection, [partialData])
+      }
+
+      const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+
+      await connection.connect()
+      expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.CONNECTED)
+      await expect(connection.send(apiVersions())).rejects.toThrowError(KafkaJSRequestTimeoutError)
+
+      expect(connection.bytesBuffered).toEqual(partialData.length)
+      expect(connection.bytesNeeded).toEqual(Decoder.int32Size() + remainderBuffer.length)
+      expect(connection.chunks.length).toEqual(1)
+      expect(connection.chunks[0]).toEqual(partialData)
+      expect(connection.correlationId).toEqual(1)
+
+      await connection.disconnect()
+      expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.DISCONNECTED)
+      expect(connection.bytesBuffered).toEqual(0)
+      expect(connection.bytesNeeded).toEqual(Decoder.int32Size())
+      expect(connection.chunks.length).toEqual(0)
+      expect(connection.correlationId).toEqual(0)
+
+      await sleep(20)
+
+      connection.processData = originalProcessData
+      connection.requestQueue.enforceRequestTimeout = false
+
+      await connection.connect()
+      await connection.send(apiVersions())
+      await connection.disconnect()
+
+      expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.DISCONNECTED)
+      expect(connection.bytesBuffered).toEqual(0)
+      expect(connection.bytesNeeded).toEqual(Decoder.int32Size())
+      expect(connection.chunks.length).toEqual(0)
+      expect(connection.correlationId).toEqual(0)
+    })
   })
 
   describe('#send', () => {
