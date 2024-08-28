@@ -1,7 +1,7 @@
 const { EventEmitter } = require('events')
 const Long = require('../utils/long')
 const createRetry = require('../retry')
-const { isKafkaJSError, isRebalancing } = require('../errors')
+const { isKafkaJSError, isRebalancing, isUnknownMember } = require('../errors')
 
 const {
   events: { FETCH, FETCH_START, START_BATCH_PROCESS, END_BATCH_PROCESS, REBALANCING },
@@ -90,6 +90,32 @@ module.exports = class Runner extends EventEmitter {
     this.scheduleFetchManager()
   }
 
+  async reJoinDueToRebalance(error) {
+    this.logger.warn('The group is rebalancing, re-joining', {
+      groupId: this.consumerGroup.groupId,
+      memberId: this.consumerGroup.memberId,
+      error: error.message,
+    })
+
+    this.instrumentationEmitter.emit(REBALANCING, {
+      groupId: this.consumerGroup.groupId,
+      memberId: this.consumerGroup.memberId,
+    })
+
+    await this.consumerGroup.joinAndSync()
+  }
+
+  async reJoinDueToUnknownMember(error) {
+    this.logger.error('The coordinator is not aware of this member, re-joining the group', {
+      groupId: this.consumerGroup.groupId,
+      memberId: this.consumerGroup.memberId,
+      error: error.message,
+    })
+
+    this.consumerGroup.memberId = null
+    await this.consumerGroup.joinAndSync()
+  }
+
   scheduleFetchManager() {
     if (!this.running) {
       this.consuming = false
@@ -110,36 +136,9 @@ module.exports = class Runner extends EventEmitter {
       }
 
       try {
+        await this.heartbeat()
         await this.fetchManager.start()
       } catch (e) {
-        if (isRebalancing(e)) {
-          this.logger.warn('The group is rebalancing, re-joining', {
-            groupId: this.consumerGroup.groupId,
-            memberId: this.consumerGroup.memberId,
-            error: e.message,
-          })
-
-          this.instrumentationEmitter.emit(REBALANCING, {
-            groupId: this.consumerGroup.groupId,
-            memberId: this.consumerGroup.memberId,
-          })
-
-          await this.consumerGroup.joinAndSync()
-          return
-        }
-
-        if (e.type === 'UNKNOWN_MEMBER_ID') {
-          this.logger.error('The coordinator is not aware of this member, re-joining the group', {
-            groupId: this.consumerGroup.groupId,
-            memberId: this.consumerGroup.memberId,
-            error: e.message,
-          })
-
-          this.consumerGroup.memberId = null
-          await this.consumerGroup.joinAndSync()
-          return
-        }
-
         if (e.name === 'KafkaJSNotImplemented') {
           return bail(e)
         }
@@ -147,6 +146,42 @@ module.exports = class Runner extends EventEmitter {
         if (e.name === 'KafkaJSNoBrokerAvailableError') {
           return bail(e)
         }
+
+        if (isRebalancing(e)) {
+          await this.reJoinDueToRebalance(e)
+          return
+        }
+
+        if (isUnknownMember(e)) {
+          await this.reJoinDueToUnknownMember(e)
+          return
+        }
+
+        // other retriable errors fall through here...
+
+        // emit a heartbeat before moving to the next retry loop
+        await this.heartbeat().catch(hbError => {
+          if (isRebalancing(hbError)) {
+            return this.reJoinDueToRebalance(hbError)
+          }
+
+          if (isUnknownMember(hbError)) {
+            return this.reJoinDueToUnknownMember(hbError)
+          }
+
+          this.logger.error('Runner failed to heartbeat.', {
+            groupId: this.consumerGroup.groupId,
+            memberId: this.consumerGroup.memberId,
+            error: hbError.message,
+            stack: hbError.stack,
+            fetchError: {
+              error: e.message,
+              stack: e.stack,
+            },
+          })
+
+          throw hbError
+        })
 
         this.logger.debug('Error while scheduling fetch manager, trying again...', {
           groupId: this.consumerGroup.groupId,
