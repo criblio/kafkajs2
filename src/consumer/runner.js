@@ -180,7 +180,7 @@ module.exports = class Runner extends EventEmitter {
             },
           })
 
-          throw hbError
+          throw e
         })
 
         this.logger.debug('Error while scheduling fetch manager, trying again...', {
