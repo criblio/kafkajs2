@@ -109,8 +109,27 @@ module.exports = class Runner extends EventEmitter {
         return
       }
 
+      let heartbeatTimer
       try {
-        await this.fetchManager.start()
+        await Promise.race([
+          // `fetchManager` starts and coordinates `fetchers`. these can be seen as a long
+          // lived poller that are expected to run until the consumer experiences an error
+          // and while the manager is not instructed to exit from the outside. data polled by
+          // `fetches` is distributed among `workers`.
+          // on error, the manager will simply stop pollers and eval whether it needs to self-restart
+          // or simply exit (retriable vs fatal errors).
+          this.fetchManager.start(),
+          // keep the consumer alive, and react to group changes, by heartbeating out-band.
+          // `fetchManager` kind of delegates heartbeats to the `fetchers` and `workers`, but they
+          // might to fail to do so, on a timeline manner under, specific circumstances, such as
+          // fetch requests and batch processing taking too long.
+          new Promise((resolve, reject) => {
+            heartbeatTimer = setInterval(() => {
+              this.heartbeat().catch(reject)
+            }, this.heartbeatInterval);
+          })
+        ])
+
       } catch (e) {
         if (isRebalancing(e)) {
           this.logger.warn('The group is rebalancing, re-joining', {
@@ -158,6 +177,9 @@ module.exports = class Runner extends EventEmitter {
         })
 
         throw e
+      } finally {
+        clearInterval(heartbeatTimer)
+        heartbeatTimer = null
       }
     })
       .then(() => {
@@ -204,7 +226,7 @@ module.exports = class Runner extends EventEmitter {
     })
   }
 
-  async heartbeat() {
+  heartbeat = sharedPromiseTo(async () => {
     try {
       await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
     } catch (e) {
@@ -213,7 +235,7 @@ module.exports = class Runner extends EventEmitter {
       }
       throw e
     }
-  }
+  })
 
   async processEachMessage(batch) {
     const { topic, partition } = batch
