@@ -7,12 +7,15 @@ const {
   KafkaJSProtocolError,
   KafkaJSNotImplemented,
   KafkaJSNumberOfRetriesExceeded,
+  KafkaJSNoBrokerAvailableError,
 } = require('../../errors')
 const { createErrorFromCode } = require('../../protocol/error')
 
 const UNKNOWN = -1
 const REBALANCE_IN_PROGRESS = 27
+const UNKNOWN_MEMBER_ID = 25
 const rebalancingError = () => new KafkaJSProtocolError(createErrorFromCode(REBALANCE_IN_PROGRESS))
+const unknownMemberError = () => new KafkaJSProtocolError(createErrorFromCode(UNKNOWN_MEMBER_ID))
 
 describe('Consumer > Runner', () => {
   let runner,
@@ -88,6 +91,205 @@ describe('Consumer > Runner', () => {
       await runner.start()
       expect(runner.scheduleFetchManager).toHaveBeenCalled()
       expect(onCrash).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when the runner heartbeats ad-hoc', () => {
+    it('should send a heartbeat alongside the start the `fetchManager`', async () => {
+      runner.heartbeat = jest.fn().mockImplementation(async () => {})
+
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(10)
+        return []
+      })
+
+      await runner.start()
+
+      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+      await waitFor(() => runner.heartbeat.mock.calls.length > 1, { maxWait: 200 })
+    })
+
+    it('should send heartbeat before retrying a failed fetch operation', async () => {
+      runner.heartbeat = jest.fn().mockImplementation(async () => {})
+
+      const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+      let fetchProm
+      const fetch = new Promise(resolve => {
+        fetchProm = resolve
+      })
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+
+      consumerGroup.fetch = jest.fn().mockImplementation(() => {
+        return fetch.then(() => {
+          return Promise.reject(new Error('WTF!')) // retriable error
+        })
+      })
+
+      await runner.start()
+      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+
+      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+
+      fetchProm()
+
+      await waitFor(() => runner.heartbeat.mock.calls.length === 2, { maxWait: 200 }) // triggered from catch, before retrying.
+
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
+    })
+
+    it('should detect a rebalance and rejoin', async () => {
+      runner.heartbeat = jest.fn().mockImplementation(async () => {
+        await sleep(100)
+        throw rebalancingError()
+      })
+
+      const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(300)
+      })
+
+      await runner.start()
+
+      expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after rebalance was detected
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
+    })
+
+    it('should detect when the consumer becomes unknown to the coordinator and rejoin', async () => {
+      runner.heartbeat = jest.fn().mockImplementation(async () => {
+        await sleep(100)
+        throw unknownMemberError()
+      })
+
+      const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(300)
+      })
+
+      await runner.start()
+
+      expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after coordinator rejects this consumer
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
+    })
+
+    const nonRetriables = [
+      { Clazz: KafkaJSNoBrokerAvailableError, name: 'KafkaJSNoBrokerAvailableError' },
+      { Clazz: KafkaJSNotImplemented, name: 'KafkaJSNotImplemented' },
+    ]
+    nonRetriables.forEach(args => {
+      it(`should not send heartbeat with non-retriable errors but allow the consumer to crash - ${args.name}`, async () => {
+        runner.heartbeat = jest.fn().mockImplementation(async () => {})
+
+        let fetchProm
+        const fetch = new Promise(resolve => {
+          fetchProm = resolve
+        })
+        consumerGroup.getNodeIds = jest.fn(() => [1])
+
+        consumerGroup.fetch = jest.fn().mockImplementation(() => {
+          return fetch.then(() => {
+            return Promise.reject(new args.Clazz('WTF!'))
+          })
+        })
+
+        await runner.start()
+        expect(runner.heartbeat).toHaveBeenCalledTimes(1)
+        fetchProm()
+        await waitFor(() => onCrash.mock.calls.length === 1, { maxWait: 200 })
+      })
+    })
+
+    describe('when heartbeating before retrying', () => {
+      it('should detect a rebalance and rejoin', async () => {
+        runner.heartbeat = jest
+          .fn()
+          .mockImplementationOnce(() => {}) // 1st heartbeat succeeds
+          .mockImplementationOnce(async () => {
+            await sleep(100)
+            throw rebalancingError() // 2nd heartbeat fails with a rebalance error
+          })
+
+        const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+        consumerGroup.getNodeIds = jest.fn(() => [1])
+        consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+          throw new Error('WTF!')
+        })
+
+        await runner.start()
+
+        expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+        expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+        expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+
+        await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after rebalance was detected
+      })
+
+      it('should  when the consumer becomes unknown to the coordinator and rejoin', async () => {
+        runner.heartbeat = jest
+          .fn()
+          .mockImplementationOnce(() => {}) // 1st heartbeat succeeds
+          .mockImplementationOnce(async () => {
+            await sleep(100)
+            throw unknownMemberError() // 2nd heartbeat fails with the unknown-member error
+          })
+
+        const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+        consumerGroup.getNodeIds = jest.fn(() => [1])
+        consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+          throw new Error('WTF!')
+        })
+
+        await runner.start()
+
+        expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+        expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+        expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+
+        await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after rebalance was detected
+      })
+
+      it('should pass along the first error if heartbeat fails as well', async () => {
+        runner.heartbeat = jest
+          .fn()
+          .mockImplementationOnce(() => {}) // 1st heartbeat succeeds
+          .mockImplementationOnce(async () => {
+            await sleep(100)
+            throw new Error('WTF') // 2nd heartbeat fails with retriable error
+          })
+
+        const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+
+        consumerGroup.getNodeIds = jest.fn(() => [1])
+        consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+          const nonRetriableError = new Error('Non-retriable - WTF!')
+          nonRetriableError.retriable = false
+          throw nonRetriableError
+        })
+
+        await runner.start()
+
+        expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+        expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+        expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+        await waitFor(() => onCrash.mock.calls.length === 1, { maxWait: 200 }) // due to the retrier getting a non-retriable error thus aborting
+        await waitFor(() => runner.heartbeat.mock.calls.length === 2, { maxWait: 200 }) // 2nd call from within the catch block
+        expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
+      })
     })
   })
 
