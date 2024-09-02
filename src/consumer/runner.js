@@ -1,6 +1,7 @@
 const { EventEmitter } = require('events')
 const Long = require('../utils/long')
 const createRetry = require('../retry')
+const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const { isKafkaJSError, isRebalancing } = require('../errors')
 
 const {
@@ -61,6 +62,19 @@ module.exports = class Runner extends EventEmitter {
 
     this.running = false
     this.consuming = false
+    this.t1 = null
+    this.t2 = null
+
+    this.heartbeat = sharedPromiseTo(async () => {
+      try {
+        await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
+      } catch (e) {
+        if (isRebalancing(e)) {
+          await this.autoCommitOffsets()
+        }
+        throw e
+      }
+    })
   }
 
   get consuming() {
@@ -105,13 +119,34 @@ module.exports = class Runner extends EventEmitter {
     this.consuming = true
 
     this.retrier(async (bail, retryCount, retryTime) => {
+      this.stopAdHocHeartbeats()
       if (!this.running) {
         return
       }
 
       try {
-        await this.fetchManager.start()
+        await Promise.race([
+          // `fetchManager` starts and coordinates `fetchers`. these can be seen as a long
+          // lived poller that are expected to run until the consumer experiences an error
+          // and while the manager is not instructed to exit from the outside. data polled by
+          // `fetches` is distributed among `workers`.
+          // on error, the manager will simply stop pollers and eval whether it needs to self-restart
+          // or simply exit (retriable vs fatal errors).
+          this.fetchManager.start(),
+          // keep the consumer alive, and react to group changes, by heartbeating out-band.
+          // `fetchManager` kind of delegates heartbeats to the `fetchers` and `workers`, but they
+          // might to fail to do so, on a timeline manner under, specific circumstances, such as
+          // fetch requests and batch processing taking too long.
+          new Promise((resolve, reject) => {
+            this.t1 = setTimeout(() => {
+              this.t2 = setInterval(() => {
+                this.heartbeat().catch(reject)
+              }, this.heartbeatInterval).unref()
+            }, this.heartbeatInterval).unref()
+          }),
+        ])
       } catch (e) {
+        this.stopAdHocHeartbeats()
         if (isRebalancing(e)) {
           this.logger.warn('The group is rebalancing, re-joining', {
             groupId: this.consumerGroup.groupId,
@@ -158,6 +193,8 @@ module.exports = class Runner extends EventEmitter {
         })
 
         throw e
+      } finally {
+        this.stopAdHocHeartbeats()
       }
     })
       .then(() => {
@@ -168,9 +205,18 @@ module.exports = class Runner extends EventEmitter {
         this.consuming = false
         this.running = false
       })
+      .finally(() => this.stopAdHocHeartbeats())
+  }
+
+  stopAdHocHeartbeats() {
+    clearTimeout(this.t1)
+    this.t1 = null
+    clearInterval(this.t2)
+    this.t2 = null
   }
 
   async stop() {
+    this.stopAdHocHeartbeats()
     if (!this.running) {
       return
     }
@@ -202,17 +248,6 @@ module.exports = class Runner extends EventEmitter {
 
       this.once(CONSUMING_STOP, () => resolve())
     })
-  }
-
-  async heartbeat() {
-    try {
-      await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
-    } catch (e) {
-      if (isRebalancing(e)) {
-        await this.autoCommitOffsets()
-      }
-      throw e
-    }
   }
 
   async processEachMessage(batch) {
