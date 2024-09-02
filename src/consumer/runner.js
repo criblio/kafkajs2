@@ -1,5 +1,6 @@
 const { EventEmitter } = require('events')
 const Long = require('../utils/long')
+const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const createRetry = require('../retry')
 const { isKafkaJSError, isRebalancing, isUnknownMember } = require('../errors')
 
@@ -61,6 +62,17 @@ module.exports = class Runner extends EventEmitter {
 
     this.running = false
     this.consuming = false
+
+    this.heartbeat = sharedPromiseTo(async () => {
+      try {
+        await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
+      } catch (e) {
+        if (isRebalancing(e)) {
+          await this.autoCommitOffsets()
+        }
+        throw e
+      }
+    })
   }
 
   get consuming() {
@@ -136,8 +148,12 @@ module.exports = class Runner extends EventEmitter {
       }
 
       try {
-        await this.heartbeat()
-        await this.fetchManager.start()
+        await Promise.race([
+          new Promise((resolve, reject) => {
+            this.heartbeat().catch(reject)
+          }),
+          this.fetchManager.start(),
+        ])
       } catch (e) {
         if (e.name === 'KafkaJSNotImplemented') {
           return bail(e)
@@ -237,17 +253,6 @@ module.exports = class Runner extends EventEmitter {
 
       this.once(CONSUMING_STOP, () => resolve())
     })
-  }
-
-  async heartbeat() {
-    try {
-      await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
-    } catch (e) {
-      if (isRebalancing(e)) {
-        await this.autoCommitOffsets()
-      }
-      throw e
-    }
   }
 
   async processEachMessage(batch) {
