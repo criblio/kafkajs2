@@ -1,6 +1,7 @@
 const { EventEmitter } = require('events')
 const Long = require('../utils/long')
 const createRetry = require('../retry')
+const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const { isKafkaJSError, isRebalancing } = require('../errors')
 
 const {
@@ -61,6 +62,17 @@ module.exports = class Runner extends EventEmitter {
 
     this.running = false
     this.consuming = false
+
+    this.heartbeat = sharedPromiseTo(async () => {
+      try {
+        await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
+      } catch (e) {
+        if (isRebalancing(e)) {
+          await this.autoCommitOffsets()
+        }
+        throw e
+      }
+    })
   }
 
   get consuming() {
@@ -126,10 +138,9 @@ module.exports = class Runner extends EventEmitter {
           new Promise((resolve, reject) => {
             heartbeatTimer = setInterval(() => {
               this.heartbeat().catch(reject)
-            }, this.heartbeatInterval);
-          })
+            }, this.heartbeatInterval)
+          }),
         ])
-
       } catch (e) {
         if (isRebalancing(e)) {
           this.logger.warn('The group is rebalancing, re-joining', {
@@ -225,17 +236,6 @@ module.exports = class Runner extends EventEmitter {
       this.once(CONSUMING_STOP, () => resolve())
     })
   }
-
-  heartbeat = sharedPromiseTo(async () => {
-    try {
-      await this.consumerGroup.heartbeat({ interval: this.heartbeatInterval })
-    } catch (e) {
-      if (isRebalancing(e)) {
-        await this.autoCommitOffsets()
-      }
-      throw e
-    }
-  })
 
   async processEachMessage(batch) {
     const { topic, partition } = batch
