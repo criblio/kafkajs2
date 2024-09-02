@@ -62,6 +62,8 @@ module.exports = class Runner extends EventEmitter {
 
     this.running = false
     this.consuming = false
+    this.t1 = null
+    this.t2 = null
 
     this.heartbeat = sharedPromiseTo(async () => {
       try {
@@ -117,11 +119,11 @@ module.exports = class Runner extends EventEmitter {
     this.consuming = true
 
     this.retrier(async (bail, retryCount, retryTime) => {
+      this.stopAdHocHeartbeats()
       if (!this.running) {
         return
       }
 
-      let heartbeatTimer
       try {
         await Promise.race([
           // `fetchManager` starts and coordinates `fetchers`. these can be seen as a long
@@ -136,12 +138,15 @@ module.exports = class Runner extends EventEmitter {
           // might to fail to do so, on a timeline manner under, specific circumstances, such as
           // fetch requests and batch processing taking too long.
           new Promise((resolve, reject) => {
-            heartbeatTimer = setInterval(() => {
-              this.heartbeat().catch(reject)
-            }, this.heartbeatInterval)
+            this.t1 = setTimeout(() => {
+              this.t2 = setInterval(() => {
+                this.heartbeat().catch(reject)
+              }, this.heartbeatInterval).unref()
+            }, this.heartbeatInterval).unref()
           }),
         ])
       } catch (e) {
+        this.stopAdHocHeartbeats()
         if (isRebalancing(e)) {
           this.logger.warn('The group is rebalancing, re-joining', {
             groupId: this.consumerGroup.groupId,
@@ -189,8 +194,7 @@ module.exports = class Runner extends EventEmitter {
 
         throw e
       } finally {
-        clearInterval(heartbeatTimer)
-        heartbeatTimer = null
+        this.stopAdHocHeartbeats()
       }
     })
       .then(() => {
@@ -201,9 +205,18 @@ module.exports = class Runner extends EventEmitter {
         this.consuming = false
         this.running = false
       })
+      .finally(() => this.stopAdHocHeartbeats())
+  }
+
+  stopAdHocHeartbeats() {
+    clearTimeout(this.t1)
+    this.t1 = null
+    clearInterval(this.t2)
+    this.t2 = null
   }
 
   async stop() {
+    this.stopAdHocHeartbeats()
     if (!this.running) {
       return
     }
