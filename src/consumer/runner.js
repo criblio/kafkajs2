@@ -150,6 +150,8 @@ module.exports = class Runner extends EventEmitter {
       try {
         await Promise.race([
           new Promise((resolve, reject) => {
+            // heartbeating from here would help keeping the consumer alive, specially
+            // when we're retrying after being idle for too long (idle time controlled by backoff)
             this.heartbeat().catch(reject)
           }),
           this.fetchManager.start(),
@@ -175,7 +177,9 @@ module.exports = class Runner extends EventEmitter {
 
         // other retriable errors fall through here...
 
-        // emit a heartbeat before moving to the next retry loop
+        // attempt to heartbeat before moving to into the next retry loop.
+        // this may help to keep the consumer alive when:
+        //   next backoff interval + time since last heartbeat > session timeout
         await this.heartbeat().catch(hbError => {
           if (isRebalancing(hbError)) {
             return this.reJoinDueToRebalance(hbError)
@@ -196,7 +200,7 @@ module.exports = class Runner extends EventEmitter {
             },
           })
 
-          throw e
+          throw e // throw the original error
         })
 
         this.logger.debug('Error while scheduling fetch manager, trying again...', {
