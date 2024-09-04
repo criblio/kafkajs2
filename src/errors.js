@@ -270,6 +270,8 @@ const isRebalancing = e =>
   e.type === 'NOT_COORDINATOR_FOR_GROUP' ||
   e.type === 'ILLEGAL_GENERATION'
 
+const isUnknownMember = e => e.type === 'UNKNOWN_MEMBER_ID'
+
 const isKafkaJSError = e => e instanceof KafkaJSError
 
 module.exports = {
@@ -305,5 +307,6 @@ module.exports = {
   KafkaJSNoBrokerAvailableError,
   KafkaJSAlterPartitionReassignmentsError,
   isRebalancing,
+  isUnknownMember,
   isKafkaJSError,
 }

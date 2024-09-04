@@ -260,6 +260,12 @@ module.exports = class Connection {
   }
 
   /**
+   * Terminates a connection. In-flight requests are awaited until completion
+   * before closing the socket. Immediately after invoking this method,
+   * `connectionStatus` will reflect the `CONNECTION_STATUS.DISCONNECTING` status.
+   * Once the connection terminated, the status will be transitioned to
+   * `CONNECTION_STATUS.DISCONNECTED`, and the internals will be reset back to
+   * their original state, making this connection instance ready for reuse.
    * @public
    * @returns {Promise}
    */
