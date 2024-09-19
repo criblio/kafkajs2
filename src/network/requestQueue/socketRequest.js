@@ -29,6 +29,7 @@ const REQUEST_STATE = {
  * @property {boolean} expectResponse
  * @property {Function} send
  * @property {Function} timeout
+ * @property {Connection} connection
  *
  * @typedef {Object} RequestEntry
  * @property {string} apiKey
@@ -49,8 +50,10 @@ module.exports = class SocketRequest {
    * @param {Function} options.send
    * @param {() => void} options.timeout
    * @param {import("../../instrumentation/emitter")} [options.instrumentationEmitter=null]
+   * @param {import("../connection")} [options.connection]
    */
   constructor({
+    connection,
     requestTimeout,
     broker,
     clientId,
@@ -60,6 +63,7 @@ module.exports = class SocketRequest {
     timeout,
     instrumentationEmitter = null,
   }) {
+    this.connection = connection
     this.createdAt = Date.now()
     this.requestTimeout = requestTimeout
     this.broker = broker
@@ -94,7 +98,9 @@ module.exports = class SocketRequest {
   timeoutRequest() {
     const { apiName, apiKey, apiVersion } = this.entry
     const requestInfo = `${apiName}(key: ${apiKey}, version: ${apiVersion})`
+    const connectionInfo = this.connection ? this.connection.getInternalState() : {}
     const eventData = {
+      cxnInfo: connectionInfo,
       broker: this.broker,
       clientId: this.clientId,
       correlationId: this.correlationId,

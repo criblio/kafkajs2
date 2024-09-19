@@ -411,6 +411,19 @@ export type RequestTimeoutEvent = InstrumentationEvent<{
   clientId: string
   correlationId: number
   createdAt: number
+  cxnInfo: {
+    localPort: number
+    localAddress: string
+    remotePort: number
+    remoteAddress: string
+    bytesRead: number
+    bytesWritten: number
+    chunks: Buffer[],
+    lastDataRead: Buffer,
+    lastDataTimestamp: number,
+    bytesBuffered: number,
+    bytesNeeded: number
+  }
   pendingDuration: number
   sentAt: number
 }>

@@ -21,6 +21,7 @@ module.exports = class RequestQueue extends EventEmitter {
    * @param {string} options.broker
    * @param {import("../../../types").Logger} options.logger
    * @param {import("../../instrumentation/emitter")} [options.instrumentationEmitter=null]
+   * @param {import("../connection")} [options.connection]
    * @param {() => boolean} [options.isConnected]
    */
   constructor({
@@ -32,6 +33,7 @@ module.exports = class RequestQueue extends EventEmitter {
     broker,
     logger,
     isConnected = () => true,
+    connection,
   }) {
     super()
     this.instrumentationEmitter = instrumentationEmitter
@@ -42,6 +44,7 @@ module.exports = class RequestQueue extends EventEmitter {
     this.broker = broker
     this.logger = logger
     this.isConnected = isConnected
+    this.connection = connection
 
     this.inflight = new Map()
     this.pending = []
@@ -120,6 +123,7 @@ module.exports = class RequestQueue extends EventEmitter {
     const requestTimeout = Math.max(defaultRequestTimeout, customRequestTimeout || 0)
 
     const socketRequest = new SocketRequest({
+      connection: this.connection,
       entry: pushedRequest.entry,
       expectResponse: pushedRequest.expectResponse,
       broker: this.broker,

@@ -88,6 +88,9 @@ module.exports = class Connection {
     this.bytesNeeded = Decoder.int32Size()
     this.chunks = []
 
+    this.lastDataRead = null
+    this.lastDataTimestamp = 0
+
     this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
     this.correlationId = 0
     this.requestQueue = new RequestQueue({
@@ -99,6 +102,7 @@ module.exports = class Connection {
       broker: this.broker,
       logger: logger.namespace('RequestQueue'),
       isConnected: () => this.isConnected(),
+      connection: this,
     })
 
     this.versions = null
@@ -113,6 +117,7 @@ module.exports = class Connection {
 
     this.logDebug = log('debug')
     this.logError = log('error')
+    this.logInfo = log('info')
 
     const env = getEnv()
     this.shouldLogBuffers = env.KAFKAJS_DEBUG_PROTOCOL_BUFFERS === '1'
@@ -177,6 +182,13 @@ module.exports = class Connection {
         clearTimeout(timeoutId)
         this.connectionStatus = CONNECTION_STATUS.CONNECTED
         this.requestQueue.scheduleRequestTimeoutCheck()
+        this.logInfo('Socket successfully connected', {
+          broker: this.broker,
+          localPort: this.socket ? this.socket.localPort : -1,
+          localAddress: this.socket ? this.socket.localAddress : '',
+          remotePort: this.socket ? this.socket.remotePort : -1,
+          remoteAddress: this.socket ? this.socket.remoteAddress : '',
+        })
         resolve(true)
       }
 
@@ -212,7 +224,15 @@ module.exports = class Connection {
           code: e.code,
         })
 
-        this.logError(error.message, { stack: e.stack })
+        this.logError(error.message, {
+          stack: e.stack,
+          localPort: this.socket ? this.socket.localPort : -1,
+          localAddress: this.socket ? this.socket.localAddress : '',
+          remotePort: this.socket ? this.socket.remotePort : -1,
+          remoteAddress: this.socket ? this.socket.remoteAddress : '',
+          bytesRead: this.socket ? this.socket.bytesRead : -1,
+          bytesWritten: this.socket ? this.socket.bytesWritten : -1,
+        })
         this.rejectRequests(error)
         await this.disconnect()
 
@@ -281,6 +301,9 @@ module.exports = class Connection {
     this.bytesBuffered = 0
     this.chunks = []
     this.correlationId = 0
+
+    this.lastDataRead = null
+    this.lastDataTimestamp = 0
 
     if (this.socket) {
       this.socket.end()
@@ -405,6 +428,10 @@ module.exports = class Connection {
         correlationId,
         expectResponse,
         size: Buffer.byteLength(requestPayload.buffer),
+        localPort: this.socket ? this.socket.localPort : -1,
+        localAddress: this.socket ? this.socket.localAddress : '',
+        remotePort: this.socket ? this.socket.remotePort : -1,
+        remoteAddress: this.socket ? this.socket.remoteAddress : '',
       })
 
       return new Promise((resolve, reject) => {
@@ -447,6 +474,10 @@ module.exports = class Connection {
         correlationId,
         size,
         data: isFetchApi && !this.shouldLogFetchBuffer ? '[filtered]' : data,
+        localPort: this.socket ? this.socket.localPort : -1,
+        localAddress: this.socket ? this.socket.localAddress : '',
+        remotePort: this.socket ? this.socket.remotePort : -1,
+        remoteAddress: this.socket ? this.socket.remoteAddress : '',
       })
 
       return data
@@ -456,6 +487,10 @@ module.exports = class Connection {
           error: e.message,
           correlationId,
           size,
+          localPort: this.socket ? this.socket.localPort : -1,
+          localAddress: this.socket ? this.socket.localAddress : '',
+          remotePort: this.socket ? this.socket.remotePort : -1,
+          remoteAddress: this.socket ? this.socket.remoteAddress : '',
         })
       }
 
@@ -463,6 +498,10 @@ module.exports = class Connection {
       this.logDebug(`Response ${requestInfo(entry)}`, {
         error: e.message,
         correlationId,
+        localPort: this.socket ? this.socket.localPort : -1,
+        localAddress: this.socket ? this.socket.localAddress : '',
+        remotePort: this.socket ? this.socket.remotePort : -1,
+        remoteAddress: this.socket ? this.socket.remoteAddress : '',
         payload:
           isBuffer && !this.shouldLogBuffers ? { type: 'Buffer', data: '[filtered]' } : payload,
       })
@@ -497,6 +536,9 @@ module.exports = class Connection {
    * @private
    */
   processData(rawData) {
+    this.lastDataRead = rawData
+    this.lastDataTimestamp = Date.now()
+
     if (this.authHandlers && !this.authExpectResponse) {
       return this.authHandlers.onSuccess(rawData)
     }
@@ -542,6 +584,25 @@ module.exports = class Connection {
         correlationId,
         payload,
       })
+    }
+  }
+
+  /**
+   * @public
+   */
+  getInternalState() {
+    return {
+      localPort: this.socket ? this.socket.localPort : -1,
+      localAddress: this.socket ? this.socket.localAddress : '',
+      remotePort: this.socket ? this.socket.remotePort : -1,
+      remoteAddress: this.socket ? this.socket.remoteAddress : '',
+      bytesRead: this.socket ? this.socket.bytesRead : -1,
+      bytesWritten: this.socket ? this.socket.bytesWritten : -1,
+      chunks: this.chunks,
+      lastDataRead: this.lastDataRead,
+      lastDataTimestamp: this.lastDataTimestamp,
+      bytesBuffered: this.bytesBuffered,
+      bytesNeeded: this.bytesNeeded,
     }
   }
 
