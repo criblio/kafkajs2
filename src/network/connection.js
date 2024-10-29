@@ -10,7 +10,6 @@ const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const Long = require('../utils/long')
 const SASLAuthenticator = require('../broker/saslAuthenticator')
 const apiKeys = require('../protocol/requests/apiKeys')
-const ioctl = require('ioctl')
 
 const requestInfo = ({ apiName, apiKey, apiVersion }) =>
   `${apiName}(key: ${apiKey}, version: ${apiVersion})`
