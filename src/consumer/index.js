@@ -201,7 +201,7 @@ module.exports = ({
     }
 
     const start = async onCrash => {
-      logger.info('Starting', { groupId })
+      logger.debug('Starting', { groupId })
 
       consumerGroup = new ConsumerGroup({
         logger: rootLogger,
