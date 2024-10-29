@@ -592,21 +592,6 @@ module.exports = class Connection {
    * @public
    */
   getInternalState() {
-    const TIOCOUTQ = 0x5411
-    let sendQ
-    try {
-      if (this.socket) {
-        const buffer = new Buffer(4)
-        ioctl(this.socket._handle.fd, TIOCOUTQ, buffer)
-        sendQ = buffer.readInt32LE(0)
-      } else {
-        sendQ = -1
-      }
-    } catch (err) {
-      this.logError('Error running ioctl', { err })
-      sendQ = -2
-    }
-
     return {
       localPort: this.socket ? this.socket.localPort : -1,
       localAddress: this.socket ? this.socket.localAddress : '',
@@ -614,7 +599,7 @@ module.exports = class Connection {
       remoteAddress: this.socket ? this.socket.remoteAddress : '',
       bytesRead: this.socket ? this.socket.bytesRead : -1,
       bytesWritten: this.socket ? this.socket.bytesWritten : -1,
-      sendQ,
+      fileDescriptor: this.socket && this.socket._handle ? this.socket._handle.fd ?? -1 : -1,
       chunks: this.chunks,
       lastDataRead: this.lastDataRead,
       lastDataTimestamp: this.lastDataTimestamp,

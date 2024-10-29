@@ -75,9 +75,7 @@
     "typescript": "^3.8.3",
     "uuid": "^3.3.2"
   },
-  "dependencies": {
-    "ioctl": "^2.0.2"
-  },
+  "dependencies": {},
   "lint-staged": {
     "*.js": [
       "prettier --write",

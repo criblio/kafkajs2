@@ -419,6 +419,7 @@ export type RequestTimeoutEvent = InstrumentationEvent<{
     bytesRead: number
     bytesWritten: number
     chunks: Buffer[],
+    fileDescriptor: number,
     lastDataRead: Buffer,
     lastDataTimestamp: number,
     bytesBuffered: number,
