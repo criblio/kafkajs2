@@ -7,7 +7,7 @@ module.exports = () => {
   const net = require('net')
   const tls = require('tls')
 
-  return ({ host, port, ssl, onConnect }) => {
+  return ({ id, host, port, ssl, onConnect }) => {
     const socket = ssl
       ? tls.connect(
           Object.assign({ host, port }, !net.isIP(host) ? { servername: host } : {}, ssl),

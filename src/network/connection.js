@@ -54,6 +54,7 @@ module.exports = class Connection {
    * @param {import("../instrumentation/emitter")} [options.instrumentationEmitter=null]
    */
   constructor({
+    id,
     host,
     port,
     logger,
@@ -69,6 +70,7 @@ module.exports = class Connection {
     maxInFlightRequests = null,
     instrumentationEmitter = null,
   }) {
+    this.id = id
     this.host = host
     this.port = port
     this.rack = rack
@@ -239,6 +241,7 @@ module.exports = class Connection {
         timeoutId = setTimeout(onTimeout, this.connectionTimeout)
         this.socket = createSocket({
           socketFactory: this.socketFactory,
+          id: this.id,
           host: this.host,
           port: this.port,
           ssl: this.ssl,
