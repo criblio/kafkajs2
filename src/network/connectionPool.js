@@ -16,7 +16,7 @@ module.exports = class ConnectionPool {
     this.clientId = options.clientId
     this.socketFactory = options.socketFactory
 
-    this.pool = new Array(2).fill().map(() => new Connection(options))
+    this.pool = new Array(2).fill().map((entry, id) => new Connection({ id, ...options }))
   }
 
   isConnected() {

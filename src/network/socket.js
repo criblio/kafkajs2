@@ -12,6 +12,7 @@
  */
 module.exports = ({
   socketFactory,
+  id,
   host,
   port,
   ssl,
@@ -21,7 +22,7 @@ module.exports = ({
   onError,
   onTimeout,
 }) => {
-  const socket = socketFactory({ host, port, ssl, onConnect })
+  const socket = socketFactory({ id, host, port, ssl, onConnect })
 
   socket.on('data', onData)
   socket.on('end', onEnd)

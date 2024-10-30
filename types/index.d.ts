@@ -64,6 +64,7 @@ export interface KafkaConfig {
 }
 
 export interface ISocketFactoryArgs {
+  id: number
   host: string
   port: number
   ssl: tls.ConnectionOptions
