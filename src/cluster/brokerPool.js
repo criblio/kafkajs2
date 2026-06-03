@@ -19,6 +19,7 @@ module.exports = class BrokerPool {
    * @param {boolean} [options.allowAutoTopicCreation]
    * @param {number} [options.authenticationTimeout]
    * @param {number} [options.metadataMaxAge]
+   * @param {import("../instrumentation/emitter")} [options.instrumentationEmitter]
    */
   constructor({
     connectionPoolBuilder,
@@ -27,6 +28,7 @@ module.exports = class BrokerPool {
     allowAutoTopicCreation,
     authenticationTimeout,
     metadataMaxAge,
+    instrumentationEmitter = null,
   }) {
     this.rootLogger = logger
     this.connectionPoolBuilder = connectionPoolBuilder
@@ -39,6 +41,7 @@ module.exports = class BrokerPool {
       new Broker({
         allowAutoTopicCreation,
         authenticationTimeout,
+        instrumentationEmitter,
         ...options,
       })
 
