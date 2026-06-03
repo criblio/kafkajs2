@@ -58,6 +58,11 @@ let removeListener = consumer.on(consumer.events.HEARTBEAT, e =>
 )
 removeListener()
 
+removeListener = consumer.on(consumer.events.BROKER_API_VERSIONS, e =>
+  console.log(`broker ${e.payload.broker} api versions`, e.payload.apiVersions)
+)
+removeListener()
+
 const runConsumer = async () => {
   await consumer.connect()
   await consumer.subscribe({ topics: [topic] })
