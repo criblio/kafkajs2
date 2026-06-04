@@ -92,12 +92,21 @@ module.exports = class Broker {
       if (!this.versions) {
         this.versions = await this.apiVersions()
         if (this.instrumentationEmitter) {
-          this.instrumentationEmitter.emit(BROKER_API_VERSIONS, {
-            broker: this.brokerAddress,
-            nodeId: this.nodeId,
-            clientId: this.connectionPool.clientId,
-            apiVersions: this.versions,
-          })
+          // Telemetry only: never let a misbehaving listener break the connection path,
+          // since this emit happens mid-connect (before authenticate).
+          try {
+            this.instrumentationEmitter.emit(BROKER_API_VERSIONS, {
+              broker: this.brokerAddress,
+              nodeId: this.nodeId,
+              clientId: this.connectionPool.clientId,
+              apiVersions: this.versions,
+            })
+          } catch (e) {
+            this.logger.debug('Failed to emit BROKER_API_VERSIONS event', {
+              broker: this.brokerAddress,
+              error: e.message,
+            })
+          }
         }
       }
       this.connectionPool.setVersions(this.versions)
