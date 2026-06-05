@@ -72,6 +72,50 @@ describe('Broker > BROKER_API_VERSIONS event', () => {
     expect(setVersions).toHaveBeenCalledWith(VERSIONS)
   })
 
+  test('emits a deep copy: mutating the payload at any layer does not corrupt the live versions', async () => {
+    // A fresh live object plus an independent pristine snapshot to compare against.
+    // Using the shared VERSIONS const would make the "original unmutated" assertion
+    // compare the object to itself, which cannot catch a leaked reference.
+    const liveVersions = {
+      0: { minVersion: 0, maxVersion: 9 },
+      18: { minVersion: 0, maxVersion: 3 },
+    }
+    const pristine = {
+      0: { minVersion: 0, maxVersion: 9 },
+      18: { minVersion: 0, maxVersion: 3 },
+    }
+
+    const broker = new Broker({
+      connectionPool,
+      logger: newLogger(),
+      nodeId: 7,
+      instrumentationEmitter: emitter,
+    })
+    jest.spyOn(broker, 'apiVersions').mockResolvedValue(liveVersions)
+    let payload
+    emitter.addListener(BROKER_API_VERSIONS, event => {
+      payload = event.payload
+    })
+
+    await broker.connect()
+
+    // The emitted apiVersions is a distinct object graph at every layer, not the live object.
+    expect(payload.apiVersions).not.toBe(liveVersions)
+    expect(payload.apiVersions[18]).not.toBe(liveVersions[18])
+
+    // Mutate the emitted payload at both the top layer (add/remove keys) and the
+    // nested layer (change a version range).
+    payload.apiVersions[42] = { minVersion: 0, maxVersion: 0 }
+    delete payload.apiVersions[0]
+    payload.apiVersions[18].maxVersion = 999
+
+    // The broker still holds the original object, and that object is untouched -- so the
+    // setVersions()/lookup() calls that ran on the same reference saw uncorrupted data.
+    expect(broker.versions).toBe(liveVersions)
+    expect(broker.versions).toEqual(pristine)
+    expect(setVersions).toHaveBeenCalledWith(pristine)
+  })
+
   test('does not emit when api version negotiation fails, and surfaces the error', async () => {
     const broker = new Broker({
       connectionPool,

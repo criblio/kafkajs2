@@ -4,6 +4,7 @@ const { requests, lookup } = require('../protocol/requests')
 const { KafkaJSNonRetriableError } = require('../errors')
 const apiKeys = require('../protocol/requests/apiKeys')
 const shuffle = require('../utils/shuffle')
+const mapValues = require('../utils/mapValues')
 const { BROKER_API_VERSIONS } = require('./instrumentationEvents')
 
 const PRIVATE = {
@@ -99,7 +100,9 @@ module.exports = class Broker {
               broker: this.brokerAddress,
               nodeId: this.nodeId,
               clientId: this.connectionPool.clientId,
-              apiVersions: this.versions,
+              // Emit a deep copy (both layers) so a listener mutating the payload cannot
+              // corrupt the live versions object that setVersions()/lookup() consume below.
+              apiVersions: mapValues(this.versions, version => ({ ...version })),
             })
           } catch (e) {
             this.logger.debug('Failed to emit BROKER_API_VERSIONS event', {
