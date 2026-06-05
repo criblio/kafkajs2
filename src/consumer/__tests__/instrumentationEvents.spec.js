@@ -519,6 +519,26 @@ describe('Consumer > Instrumentation Events', () => {
     })
   })
 
+  it('emits broker api versions', async () => {
+    const brokerApiVersionsListener = jest.fn().mockName('broker_api_versions')
+
+    consumer = createTestConsumer()
+    consumer.on(consumer.events.BROKER_API_VERSIONS, brokerApiVersionsListener)
+
+    await consumer.connect()
+    expect(brokerApiVersionsListener).toHaveBeenCalledWith({
+      id: expect.any(Number),
+      timestamp: expect.any(Number),
+      type: 'consumer.broker.api_versions',
+      payload: {
+        broker: expect.any(String),
+        nodeId: null,
+        clientId: expect.any(String),
+        apiVersions: expect.any(Object),
+      },
+    })
+  })
+
   it('emits request timeout events', async () => {
     cluster = createCluster({
       instrumentationEmitter: emitter,

@@ -101,6 +101,7 @@ module.exports = class Cluster {
       allowAutoTopicCreation,
       authenticationTimeout,
       metadataMaxAge,
+      instrumentationEmitter,
     })
     this.committedOffsetsByGroup = offsets
 

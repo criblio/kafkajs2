@@ -226,6 +226,31 @@ describe('Producer', () => {
     })
   })
 
+  test('emits the broker api versions event', async () => {
+    const emitter = new InstrumentationEventEmitter()
+    producer = createProducer({
+      logger: newLogger(),
+      cluster: createCluster({ instrumentationEmitter: emitter }),
+      instrumentationEmitter: emitter,
+    })
+
+    const brokerApiVersionsListener = jest.fn().mockName('broker_api_versions')
+    producer.on(producer.events.BROKER_API_VERSIONS, brokerApiVersionsListener)
+
+    await producer.connect()
+    expect(brokerApiVersionsListener).toHaveBeenCalledWith({
+      id: expect.any(Number),
+      timestamp: expect.any(Number),
+      type: 'producer.broker.api_versions',
+      payload: {
+        broker: expect.any(String),
+        nodeId: null,
+        clientId: expect.any(String),
+        apiVersions: expect.any(Object),
+      },
+    })
+  })
+
   test('emits the request timeout event', async () => {
     const emitter = new InstrumentationEventEmitter()
     const cluster = createCluster({

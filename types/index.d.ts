@@ -378,6 +378,7 @@ export type AdminEvents = {
   REQUEST: 'admin.network.request'
   REQUEST_TIMEOUT: 'admin.network.request_timeout'
   REQUEST_QUEUE_SIZE: 'admin.network.request_queue_size'
+  BROKER_API_VERSIONS: 'admin.broker.api_versions'
 }
 
 export interface InstrumentationEvent<T> {
@@ -419,6 +420,12 @@ export type RequestQueueSizeEvent = InstrumentationEvent<{
   broker: string
   clientId: string
   queueSize: number
+}>
+export type BrokerApiVersionsEvent = InstrumentationEvent<{
+  broker: string
+  nodeId: number | null
+  clientId: string
+  apiVersions: ApiVersions
 }>
 
 export type SeekEntry = PartitionOffset
@@ -570,6 +577,10 @@ export type Admin = {
   on(
     eventName: AdminEvents['REQUEST_TIMEOUT'],
     listener: (event: RequestTimeoutEvent) => void
+  ): RemoveInstrumentationEventListener<typeof eventName>
+  on(
+    eventName: AdminEvents['BROKER_API_VERSIONS'],
+    listener: (event: BrokerApiVersionsEvent) => void
   ): RemoveInstrumentationEventListener<typeof eventName>
   on(
     eventName: ValueOf<AdminEvents>,
@@ -783,6 +794,7 @@ export type ProducerEvents = {
   REQUEST: 'producer.network.request'
   REQUEST_TIMEOUT: 'producer.network.request_timeout'
   REQUEST_QUEUE_SIZE: 'producer.network.request_queue_size'
+  BROKER_API_VERSIONS: 'producer.broker.api_versions'
 }
 
 export type Producer = Sender & {
@@ -809,6 +821,10 @@ export type Producer = Sender & {
   on(
     eventName: ProducerEvents['REQUEST_TIMEOUT'],
     listener: (event: RequestTimeoutEvent) => void
+  ): RemoveInstrumentationEventListener<typeof eventName>
+  on(
+    eventName: ProducerEvents['BROKER_API_VERSIONS'],
+    listener: (event: BrokerApiVersionsEvent) => void
   ): RemoveInstrumentationEventListener<typeof eventName>
   on(
     eventName: ValueOf<ProducerEvents>,
@@ -914,6 +930,7 @@ export type ConsumerEvents = {
   REQUEST: 'consumer.network.request'
   REQUEST_TIMEOUT: 'consumer.network.request_timeout'
   REQUEST_QUEUE_SIZE: 'consumer.network.request_queue_size'
+  BROKER_API_VERSIONS: 'consumer.broker.api_versions'
 }
 export type ConsumerHeartbeatEvent = InstrumentationEvent<{
   groupId: string
@@ -1105,6 +1122,10 @@ export type Consumer = {
   on(
     eventName: ConsumerEvents['REQUEST_QUEUE_SIZE'],
     listener: (event: RequestQueueSizeEvent) => void
+  ): RemoveInstrumentationEventListener<typeof eventName>
+  on(
+    eventName: ConsumerEvents['BROKER_API_VERSIONS'],
+    listener: (event: BrokerApiVersionsEvent) => void
   ): RemoveInstrumentationEventListener<typeof eventName>
   on(
     eventName: ValueOf<ConsumerEvents>,

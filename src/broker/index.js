@@ -4,6 +4,8 @@ const { requests, lookup } = require('../protocol/requests')
 const { KafkaJSNonRetriableError } = require('../errors')
 const apiKeys = require('../protocol/requests/apiKeys')
 const shuffle = require('../utils/shuffle')
+const mapValues = require('../utils/mapValues')
+const { BROKER_API_VERSIONS } = require('./instrumentationEvents')
 
 const PRIVATE = {
   SEND_REQUEST: Symbol('private:Broker:sendRequest'),
@@ -32,6 +34,7 @@ module.exports = class Broker {
    * @param {boolean} [options.allowAutoTopicCreation=true] If this and the broker config 'auto.create.topics.enable'
    *                                                are true, topics that don't exist will be created when
    *                                                fetching metadata.
+   * @param {import("../instrumentation/emitter")} [options.instrumentationEmitter=null]
    */
   constructor({
     connectionPool,
@@ -40,6 +43,7 @@ module.exports = class Broker {
     versions = null,
     authenticationTimeout = 10000,
     allowAutoTopicCreation = true,
+    instrumentationEmitter = null,
   }) {
     this.connectionPool = connectionPool
     this.nodeId = nodeId
@@ -48,6 +52,7 @@ module.exports = class Broker {
     this.versions = versions
     this.authenticationTimeout = authenticationTimeout
     this.allowAutoTopicCreation = allowAutoTopicCreation
+    this.instrumentationEmitter = instrumentationEmitter
 
     // The lock timeout has twice the connectionTimeout because the same timeout is used
     // for the first apiVersions call
@@ -87,6 +92,25 @@ module.exports = class Broker {
 
       if (!this.versions) {
         this.versions = await this.apiVersions()
+        if (this.instrumentationEmitter) {
+          // Telemetry only: never let a misbehaving listener break the connection path,
+          // since this emit happens mid-connect (before authenticate).
+          try {
+            this.instrumentationEmitter.emit(BROKER_API_VERSIONS, {
+              broker: this.brokerAddress,
+              nodeId: this.nodeId,
+              clientId: this.connectionPool.clientId,
+              // Emit a deep copy (both layers) so a listener mutating the payload cannot
+              // corrupt the live versions object that setVersions()/lookup() consume below.
+              apiVersions: mapValues(this.versions, version => ({ ...version })),
+            })
+          } catch (e) {
+            this.logger.debug('Failed to emit BROKER_API_VERSIONS event', {
+              broker: this.brokerAddress,
+              error: e.message,
+            })
+          }
+        }
       }
       this.connectionPool.setVersions(this.versions)
 
