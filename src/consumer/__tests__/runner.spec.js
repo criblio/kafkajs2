@@ -146,6 +146,7 @@ describe('Consumer > Runner', () => {
       })
 
       const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+      const fetchManagerStopSpy = jest.spyOn(runner.fetchManager, 'stop')
 
       consumerGroup.getNodeIds = jest.fn(() => [1])
       consumerGroup.fetch = jest.fn().mockImplementation(async () => {
@@ -158,8 +159,9 @@ describe('Consumer > Runner', () => {
       expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
       expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
 
-      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after rebalance was detected
-      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after abandoned fetch is stopped
+      expect(fetchManagerStopSpy).toHaveBeenCalled()
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 2000 }) // second call to fetchManager.start() on retry
     })
 
     it('should detect when the consumer becomes unknown to the coordinator and rejoin', async () => {
@@ -169,6 +171,7 @@ describe('Consumer > Runner', () => {
       })
 
       const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
+      const fetchManagerStopSpy = jest.spyOn(runner.fetchManager, 'stop')
 
       consumerGroup.getNodeIds = jest.fn(() => [1])
       consumerGroup.fetch = jest.fn().mockImplementation(async () => {
@@ -181,8 +184,9 @@ describe('Consumer > Runner', () => {
       expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
       expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
 
-      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 200 }) // rejoin after coordinator rejects this consumer
-      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after abandoned fetch is stopped
+      expect(fetchManagerStopSpy).toHaveBeenCalled()
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 2000 }) // second call to fetchManager.start() on retry
     })
 
     const nonRetriables = [

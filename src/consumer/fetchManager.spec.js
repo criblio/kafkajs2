@@ -48,6 +48,62 @@ describe('FetchManager', () => {
     expect(workers).toHaveLength(concurrency)
   })
 
+  it('should reuse an in-flight start instead of replacing the fetcher generation', async () => {
+    let resolveFetch
+    fetch = jest.fn(
+      () =>
+        new Promise(resolve => {
+          resolveFetch = resolve
+        })
+    )
+    getNodeIds = jest.fn(() => [1])
+    fetchManager = createTestFetchManager()
+
+    const firstStart = fetchManager.start()
+    await waitFor(() => fetch.mock.calls.length === 1)
+    const firstGeneration = fetchManager.getFetchers()
+
+    const secondStart = fetchManager.start()
+
+    expect(secondStart).toBe(firstStart)
+    expect(fetchManager.getFetchers()).toBe(firstGeneration)
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    const stopPromise = fetchManager.stop()
+    resolveFetch([])
+    await Promise.all([firstStart, secondStart, stopPromise])
+  })
+
+  it('should create a new fetcher generation after the previous lifecycle stops', async () => {
+    const pendingFetches = []
+    fetch = jest.fn(
+      () =>
+        new Promise(resolve => {
+          pendingFetches.push(resolve)
+        })
+    )
+    getNodeIds = jest.fn(() => [1])
+    fetchManager = createTestFetchManager()
+
+    const firstStart = fetchManager.start()
+    await waitFor(() => pendingFetches.length === 1)
+    const firstGeneration = fetchManager.getFetchers()
+    const firstStop = fetchManager.stop()
+    pendingFetches[0]([])
+    await Promise.all([firstStart, firstStop])
+
+    const secondStart = fetchManager.start()
+    await waitFor(() => pendingFetches.length === 2)
+    const secondGeneration = fetchManager.getFetchers()
+
+    expect(secondGeneration).not.toBe(firstGeneration)
+    expect(fetch).toHaveBeenCalledTimes(2)
+
+    const secondStop = fetchManager.stop()
+    pendingFetches[1]([])
+    await Promise.all([secondStart, secondStop])
+  })
+
   it('should finish processing other batches in case of an error from any single worker', async () => {
     handler.mockImplementationOnce(() => {
       throw new Error('test')

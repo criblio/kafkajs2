@@ -27,6 +27,14 @@ const createFetchManager = ({
   const workerQueue = createWorkerQueue({ workers })
 
   let fetchers = []
+  /**
+   * Every fetcher array created by an in-flight `start()`. `stop()` must walk this set: a single
+   * `fetchers` binding is overwritten when a new generation is built, which is how overlapping
+   * `start()` calls (Runner `Promise.race` vs retrier) orphan live fetchers.
+   */
+  const generations = new Set()
+  let startPromise = null
+  let stopping = false
 
   const getFetchers = () => fetchers
 
@@ -64,18 +72,36 @@ const createFetchManager = ({
     return fetchers
   }
 
-  const start = async () => {
-    logger.debug('Starting...')
+  const stopGeneration = async generation => {
+    if (!generations.has(generation)) {
+      return
+    }
 
-    while (true) {
-      fetchers = createFetchers()
+    await Promise.all(generation.map(fetcher => fetcher.stop()))
+    generations.delete(generation)
+
+    if (fetchers === generation) {
+      fetchers = []
+    }
+  }
+
+  const run = async () => {
+    logger.debug('Starting...')
+    stopping = false
+
+    while (!stopping) {
+      const currentFetchers = createFetchers()
+      fetchers = currentFetchers
+      generations.add(currentFetchers)
 
       try {
-        await Promise.all(fetchers.map(fetcher => fetcher.start()))
+        await Promise.all(currentFetchers.map(fetcher => fetcher.start()))
       } catch (error) {
-        await stop()
+        // Stop only this generation. Calling the shared `stop()` would tear down a newer
+        // generation if one existed.
+        await stopGeneration(currentFetchers)
 
-        if (error instanceof KafkaJSFetcherRebalanceError) {
+        if (!stopping && error instanceof KafkaJSFetcherRebalanceError) {
           logger.debug('Rebalancing fetchers...')
           continue
         }
@@ -87,9 +113,27 @@ const createFetchManager = ({
     }
   }
 
+  const start = () => {
+    // One lifecycle at a time. A second `start()` while fetchers are still running used to
+    // replace `fetchers` and leave the previous generation unreachable from `stop()`.
+    if (startPromise != null) {
+      return startPromise
+    }
+
+    startPromise = run().finally(() => {
+      startPromise = null
+    })
+    return startPromise
+  }
+
   const stop = async () => {
     logger.debug('Stopping fetchers...')
-    await Promise.all(fetchers.map(fetcher => fetcher.stop()))
+    stopping = true
+    const pendingStart = startPromise
+    await Promise.all(Array.from(generations, stopGeneration))
+    if (pendingStart != null) {
+      await pendingStart.catch(() => {})
+    }
     logger.debug('Stopped fetchers')
   }
 
