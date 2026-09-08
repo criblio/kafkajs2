@@ -27,6 +27,8 @@ const createFetchManager = ({
   const workerQueue = createWorkerQueue({ workers })
 
   let fetchers = []
+  let startPromise = null
+  let stopping = false
 
   const getFetchers = () => fetchers
 
@@ -64,18 +66,25 @@ const createFetchManager = ({
     return fetchers
   }
 
-  const start = async () => {
-    logger.debug('Starting...')
+  const stopFetchers = async () => {
+    const current = fetchers
+    fetchers = []
+    await Promise.all(current.map(fetcher => fetcher.stop()))
+  }
 
-    while (true) {
+  const run = async () => {
+    logger.debug('Starting...')
+    stopping = false
+
+    while (!stopping) {
       fetchers = createFetchers()
 
       try {
         await Promise.all(fetchers.map(fetcher => fetcher.start()))
       } catch (error) {
-        await stop()
+        await stopFetchers()
 
-        if (error instanceof KafkaJSFetcherRebalanceError) {
+        if (!stopping && error instanceof KafkaJSFetcherRebalanceError) {
           logger.debug('Rebalancing fetchers...')
           continue
         }
@@ -87,9 +96,27 @@ const createFetchManager = ({
     }
   }
 
+  const start = () => {
+    // One lifecycle at a time. A second `start()` while fetchers are still running used to
+    // replace `fetchers` and leave the previous generation unreachable from `stop()`.
+    if (startPromise != null) {
+      return startPromise
+    }
+
+    startPromise = run().finally(() => {
+      startPromise = null
+    })
+    return startPromise
+  }
+
   const stop = async () => {
     logger.debug('Stopping fetchers...')
-    await Promise.all(fetchers.map(fetcher => fetcher.stop()))
+    stopping = true
+    const pendingStart = startPromise
+    await stopFetchers()
+    if (pendingStart != null) {
+      await pendingStart.catch(() => {})
+    }
     logger.debug('Stopped fetchers')
   }
 

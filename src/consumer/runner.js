@@ -157,6 +157,10 @@ module.exports = class Runner extends EventEmitter {
           this.fetchManager.start(),
         ])
       } catch (e) {
+        // Losing the race abandons `start()` unless we stop it here. The retrier then
+        // reschedules, and a second `start()` used to orphan the previous fetcher generation.
+        await this.fetchManager.stop()
+
         if (e.name === 'KafkaJSNotImplemented') {
           return bail(e)
         }
