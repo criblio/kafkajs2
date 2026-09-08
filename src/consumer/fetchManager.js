@@ -27,12 +27,6 @@ const createFetchManager = ({
   const workerQueue = createWorkerQueue({ workers })
 
   let fetchers = []
-  /**
-   * Every fetcher array created by an in-flight `start()`. `stop()` must walk this set: a single
-   * `fetchers` binding is overwritten when a new generation is built, which is how overlapping
-   * `start()` calls (Runner `Promise.race` vs retrier) orphan live fetchers.
-   */
-  const generations = new Set()
   let startPromise = null
   let stopping = false
 
@@ -72,17 +66,10 @@ const createFetchManager = ({
     return fetchers
   }
 
-  const stopGeneration = async generation => {
-    if (!generations.has(generation)) {
-      return
-    }
-
-    await Promise.all(generation.map(fetcher => fetcher.stop()))
-    generations.delete(generation)
-
-    if (fetchers === generation) {
-      fetchers = []
-    }
+  const stopFetchers = async () => {
+    const current = fetchers
+    fetchers = []
+    await Promise.all(current.map(fetcher => fetcher.stop()))
   }
 
   const run = async () => {
@@ -90,16 +77,12 @@ const createFetchManager = ({
     stopping = false
 
     while (!stopping) {
-      const currentFetchers = createFetchers()
-      fetchers = currentFetchers
-      generations.add(currentFetchers)
+      fetchers = createFetchers()
 
       try {
-        await Promise.all(currentFetchers.map(fetcher => fetcher.start()))
+        await Promise.all(fetchers.map(fetcher => fetcher.start()))
       } catch (error) {
-        // Stop only this generation. Calling the shared `stop()` would tear down a newer
-        // generation if one existed.
-        await stopGeneration(currentFetchers)
+        await stopFetchers()
 
         if (!stopping && error instanceof KafkaJSFetcherRebalanceError) {
           logger.debug('Rebalancing fetchers...')
@@ -130,7 +113,7 @@ const createFetchManager = ({
     logger.debug('Stopping fetchers...')
     stopping = true
     const pendingStart = startPromise
-    await Promise.all(Array.from(generations, stopGeneration))
+    await stopFetchers()
     if (pendingStart != null) {
       await pendingStart.catch(() => {})
     }
