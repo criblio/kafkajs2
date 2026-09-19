@@ -2,7 +2,7 @@ const { EventEmitter } = require('events')
 const Long = require('../utils/long')
 const sharedPromiseTo = require('../utils/sharedPromiseTo')
 const createRetry = require('../retry')
-const { isKafkaJSError, isRebalancing, isUnknownMember } = require('../errors')
+const { KafkaJSError, isKafkaJSError, isRebalancing, isUnknownMember } = require('../errors')
 
 const {
   events: { FETCH, FETCH_START, START_BATCH_PROCESS, END_BATCH_PROCESS, REBALANCING },
@@ -148,18 +148,32 @@ module.exports = class Runner extends EventEmitter {
       }
 
       try {
-        await Promise.race([
-          new Promise((resolve, reject) => {
-            // heartbeating from here would help keeping the consumer alive, specially
-            // when we're retrying after being idle for too long (idle time controlled by backoff)
-            this.heartbeat().catch(reject)
-          }),
-          this.fetchManager.start(),
-        ])
+        // heartbeating from here would help keeping the consumer alive, specially
+        // when we're retrying after being idle for too long (idle time controlled by backoff).
+        //
+        // this is sequential on purpose: racing it against `fetchManager.start()` leaves the
+        // started fetcher generation running but unreachable from `stop()` whenever the
+        // heartbeat settles first. awaiting means a heartbeat that tells us we're out of the
+        // generation rejoins before a fetch is ever issued, and `start()` can only be
+        // re-entered after the previous one has settled.
+        await this.heartbeat()
+
+        // awaiting above opens a window: `stop()` can land while the heartbeat is in flight,
+        // and it would run `fetchManager.stop()` against an empty `fetchers` array. starting
+        // after that point creates a generation born after its own stop, which nothing holds
+        // a reference to. re-checking closes the window - `start()` assigns `fetchers`
+        // synchronously, so nothing can interleave between this check and that assignment.
+        if (!this.running) {
+          return
+        }
+
+        await this.fetchManager.start()
       } catch (e) {
-        // Losing the race abandons `start()` unless we stop it here. The retrier then
-        // reschedules, and a second `start()` used to orphan the previous fetcher generation.
-        await this.fetchManager.stop()
+        if (!this.running) {
+          // stopping: the fetch loop was torn down on purpose. there is nothing to retry and
+          // heartbeating here would log a spurious failure on the way out.
+          return
+        }
 
         if (e.name === 'KafkaJSNotImplemented') {
           return bail(e)
@@ -393,7 +407,15 @@ module.exports = class Runner extends EventEmitter {
         memberId: this.consumerGroup.memberId,
       })
 
-      return []
+      // returning an empty batch list here kept the fetcher's `while (isRunning)` loop
+      // spinning on microtasks - one core pegged, no log line, no recovery - for any
+      // generation that outlived its `stop()`. throwing ends that loop instead. the error
+      // stays retriable so it flows through the runner's existing retrier path.
+      //
+      // `scheduleFetchManager` is written so no generation should outlive its `stop()` in the
+      // first place. this is the backstop for the one that does: without it an unreachable
+      // fetcher spins, `consuming` never goes false, and `Runner.stop()` never returns.
+      throw new KafkaJSError('Consumer is not running', { retriable: true })
     }
 
     const startFetch = Date.now()

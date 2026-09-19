@@ -139,54 +139,107 @@ describe('Consumer > Runner', () => {
       await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 200 }) // second call to fetchManager.start() on retry
     })
 
-    it('should detect a rebalance and rejoin', async () => {
-      runner.heartbeat = jest.fn().mockImplementation(async () => {
-        await sleep(100)
-        throw rebalancingError()
-      })
+    /**
+     * The heartbeat is injected at `consumerGroup.heartbeat` rather than `runner.heartbeat`:
+     * `runner.heartbeat` is wrapped in `sharedPromiseTo`, so replacing it with a plain
+     * `jest.fn` gives every caller its own promise and erases the coupling under test.
+     */
+    it('should detect a rebalance and rejoin before starting a fetch', async () => {
+      consumerGroup.heartbeat = jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          await sleep(10)
+          throw rebalancingError()
+        })
+        .mockImplementation(async () => {})
 
       const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
-      const fetchManagerStopSpy = jest.spyOn(runner.fetchManager, 'stop')
 
       consumerGroup.getNodeIds = jest.fn(() => [1])
       consumerGroup.fetch = jest.fn().mockImplementation(async () => {
-        await sleep(300)
+        await sleep(10)
+        return []
       })
 
       await runner.start()
 
       expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
-      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
-      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+      expect(fetchManagerStartSpy).not.toHaveBeenCalled() // the heartbeat is awaited first
 
-      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after abandoned fetch is stopped
-      expect(fetchManagerStopSpy).toHaveBeenCalled()
-      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 2000 }) // second call to fetchManager.start() on retry
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after rebalance was detected
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 1, { maxWait: 2000 })
+
+      // exactly one generation: the rebalance was handled before any fetch was issued, so
+      // there is no abandoned `start()` to drain and none to orphan
+      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
     })
 
-    it('should detect when the consumer becomes unknown to the coordinator and rejoin', async () => {
-      runner.heartbeat = jest.fn().mockImplementation(async () => {
-        await sleep(100)
-        throw unknownMemberError()
-      })
+    it('should detect when the consumer becomes unknown to the coordinator and rejoin before starting a fetch', async () => {
+      consumerGroup.heartbeat = jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          await sleep(10)
+          throw unknownMemberError()
+        })
+        .mockImplementation(async () => {})
 
       const fetchManagerStartSpy = jest.spyOn(runner.fetchManager, 'start')
-      const fetchManagerStopSpy = jest.spyOn(runner.fetchManager, 'stop')
 
       consumerGroup.getNodeIds = jest.fn(() => [1])
       consumerGroup.fetch = jest.fn().mockImplementation(async () => {
-        await sleep(300)
+        await sleep(10)
+        return []
       })
 
       await runner.start()
 
       expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
-      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
-      expect(runner.heartbeat).toHaveBeenCalledTimes(1) // triggered along with fetchManager.start().
+      expect(fetchManagerStartSpy).not.toHaveBeenCalled() // the heartbeat is awaited first
 
-      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after abandoned fetch is stopped
-      expect(fetchManagerStopSpy).toHaveBeenCalled()
-      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 2, { maxWait: 2000 }) // second call to fetchManager.start() on retry
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 2, { maxWait: 2000 }) // rejoin after coordinator rejects this consumer
+      await waitFor(() => fetchManagerStartSpy.mock.calls.length === 1, { maxWait: 2000 })
+
+      expect(fetchManagerStartSpy).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * States the invariant directly rather than through a symptom: `start()` is never
+     * re-entered while a previous call is still in flight, so only one fetcher generation
+     * can exist and `stop()` can always reach it. Checked on every call across many rejoins,
+     * not sampled at one instant.
+     */
+    it('should never overlap fetch manager lifecycles across repeated rejoins', async () => {
+      let heartbeats = 0
+      consumerGroup.heartbeat = jest.fn().mockImplementation(async () => {
+        await sleep(5)
+        if (++heartbeats <= 3) {
+          throw rebalancingError()
+        }
+      })
+
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(5)
+        return []
+      })
+
+      let inFlight = 0
+      let maxInFlight = 0
+      const start = runner.fetchManager.start.bind(runner.fetchManager)
+      jest.spyOn(runner.fetchManager, 'start').mockImplementation(async () => {
+        maxInFlight = Math.max(maxInFlight, ++inFlight)
+        try {
+          return await start()
+        } finally {
+          inFlight--
+        }
+      })
+
+      await runner.start()
+      await waitFor(() => consumerGroup.joinAndSync.mock.calls.length === 4, { maxWait: 3000 }) // join + 3 rejoins
+      await waitFor(() => consumerGroup.fetch.mock.calls.length > 2, { maxWait: 3000 })
+
+      expect(maxInFlight).toBe(1)
     })
 
     const nonRetriables = [
@@ -294,6 +347,108 @@ describe('Consumer > Runner', () => {
         await waitFor(() => runner.heartbeat.mock.calls.length === 2, { maxWait: 200 }) // 2nd call from within the catch block
         expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(1)
       })
+    })
+  })
+
+  describe('when a fetcher generation outlives the fetch manager', () => {
+    /**
+     * A spin regresses by starving the event loop, so a plain assertion would hang the suite
+     * rather than fail it. Counting re-entries and throwing past a cap breaks the loop and
+     * lets the test report the real number.
+     */
+    const countFetchReEntriesAfterStop = () => {
+      // high enough that a healthy run never reaches it, low enough to break the spin fast
+      const MAX_RE_ENTRIES = 5000
+      const counter = { value: 0 }
+      const fetch = runner.fetch.bind(runner)
+
+      jest.spyOn(runner, 'fetch').mockImplementation(async nodeId => {
+        if (!runner.running && ++counter.value > MAX_RE_ENTRIES) {
+          throw new Error('fetch re-entered after stop')
+        }
+
+        return fetch(nodeId)
+      })
+
+      return counter
+    }
+
+    /**
+     * CRIBL-44273: an abandoned generation used to keep calling `Runner.fetch`, which returned
+     * `[]` as soon as `running` went false. Its `while (isRunning)` loop then spun on
+     * microtasks - one core pegged, no log line, no recovery. Any orphan must die instead.
+     */
+    it('should not re-enter fetch once the consumer stops', async () => {
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(5)
+        return []
+      })
+
+      const reEntries = countFetchReEntriesAfterStop()
+
+      await runner.start()
+      await waitFor(() => consumerGroup.fetch.mock.calls.length > 0, { maxWait: 2000 })
+
+      // orphan the live generation the way losing the heartbeat race used to: a second
+      // `start()` replaces `fetchers`, leaving the first generation unreachable from `stop()`
+      const abandoned = runner.fetchManager.start().catch(() => {})
+      await waitFor(() => consumerGroup.fetch.mock.calls.length > 1, { maxWait: 2000 })
+
+      await runner.stop()
+      const fetchesAtStop = consumerGroup.fetch.mock.calls.length
+
+      // each live fetcher may enter `fetch` once more before its loop unwinds; none may loop
+      expect(reEntries.value).toBeLessThanOrEqual(2)
+
+      await sleep(100)
+      expect(reEntries.value).toBeLessThanOrEqual(2)
+      expect(consumerGroup.fetch).toHaveBeenCalledTimes(fetchesAtStop)
+
+      await abandoned
+    })
+
+    /**
+     * The runner checks `running` at the top of the retrier body, then awaits the heartbeat
+     * before calling `start()`. A `stop()` landing inside that await runs `fetchManager.stop()`
+     * against an empty `fetchers` array, so the generation `start()` goes on to create is born
+     * after its stop has already passed - unreachable, exactly like a raced orphan. The
+     * re-check after the heartbeat keeps it from being created at all; the throw in `fetch()`
+     * is the backstop. Without either, it spins and `Runner.stop()` never returns.
+     */
+    it('should not leave a generation running when stop lands mid-heartbeat', async () => {
+      let releaseHeartbeat
+      consumerGroup.heartbeat = jest.fn().mockImplementation(
+        () =>
+          new Promise(resolve => {
+            releaseHeartbeat = resolve
+          })
+      )
+      consumerGroup.getNodeIds = jest.fn(() => [1])
+      consumerGroup.fetch = jest.fn().mockImplementation(async () => {
+        await sleep(5)
+        return []
+      })
+
+      const reEntries = countFetchReEntriesAfterStop()
+
+      await runner.start()
+      await waitFor(() => consumerGroup.heartbeat.mock.calls.length === 1, { maxWait: 2000 })
+      expect(runner.fetch).not.toHaveBeenCalled() // parked before `fetchManager.start()`
+
+      const stopped = runner.stop() // `running` goes false while the heartbeat is parked
+      releaseHeartbeat() // the retrier now walks into `fetchManager.start()`
+
+      await stopped // must not hang
+      await sleep(100)
+
+      // zero rather than merely bounded: the re-check means no generation is created at
+      // all, so nothing ever has to unwind. a bounded count would also pass on the backstop
+      // alone, and would not notice the re-check going away.
+      expect(reEntries.value).toBe(0)
+      expect(runner.fetch).not.toHaveBeenCalled()
+      expect(consumerGroup.fetch).not.toHaveBeenCalled() // nothing ever reached the broker
+      expect(onCrash).not.toHaveBeenCalled() // a deliberate stop is not a crash
     })
   })
 
@@ -528,24 +683,18 @@ describe('Consumer > Runner', () => {
       expect(onCrash).toHaveBeenCalledWith(error)
     })
 
-    it('should ignore request errors from fetch on stopped consumer', async () => {
-      const rejectedRequest = () =>
-        new Promise((resolve, reject) => {
-          setTimeout(() => reject(new Error('Failed or manually rejected request')), 10)
-        })
-
-      consumerGroup.fetch
-        .mockImplementationOnce(rejectedRequest)
-        .mockImplementationOnce(async () => {
-          await sleep(10)
-          return []
-        })
-
+    /**
+     * This used to resolve with an empty batch list, which let an abandoned fetcher loop
+     * forever. The error is absorbed by the fetcher loop and by the runner's catch, which
+     * short-circuits while `running` is false - see the fetcher generation tests above.
+     */
+    it('should refuse to fetch on a stopped consumer', async () => {
       runner.scheduleFetchManager = jest.fn()
       await runner.start()
       runner.running = false
 
-      await runner.fetch()
+      await expect(runner.fetch(1)).rejects.toThrow('Consumer is not running')
+      expect(consumerGroup.fetch).not.toHaveBeenCalled()
     })
   })
 })
