@@ -37,6 +37,52 @@ describe('FetchManager', () => {
     fetchManager && (await fetchManager.stop())
   })
 
+  /**
+   * CRIBL-44273: `start()` rebalances by looping - stop the generation, build the next one
+   * from the new node set. A rebalance landing while the consumer is stopping used to
+   * `continue` regardless, so a generation could be born after `stop()` had already
+   * returned, with nothing left holding a reference to it.
+   */
+  it('should not build another generation when a rebalance lands while stopping', async () => {
+    let nodeIds = [1, 2]
+    const parked = {}
+    let externalStopReturned = false
+    let fetchesAfterExternalStop = 0
+
+    getNodeIds = jest.fn(() => nodeIds)
+    fetch = jest.fn(nodeId => {
+      if (externalStopReturned) fetchesAfterExternalStop++
+      return new Promise(resolve => {
+        parked[nodeId] = resolve
+      })
+    })
+    fetchManager = createTestFetchManager({ concurrency: 1 })
+
+    const started = fetchManager.start().catch(() => {})
+    await waitFor(() => Object.keys(parked).length === 2, { maxWait: 2000 })
+    const firstGeneration = fetchManager.getFetchers()
+
+    // a rebalance lands: the node set changes, so the next `validateShouldRebalance` throws
+    nodeIds = [3]
+    parked[1]([]) // fetcher 1 re-enters, throws, and rejects the generation
+
+    // the internal teardown now waits on fetcher 2, which is still parked. the consumer
+    // stops inside that wait - the window where the loop used to `continue` into a
+    // generation nobody owns
+    await sleep(10)
+    const externalStop = fetchManager.stop()
+    await sleep(10)
+    parked[2]([])
+
+    await externalStop
+    externalStopReturned = true
+    await Promise.all([started, sleep(50)])
+
+    expect(fetchManager.getFetchers()).toBe(firstGeneration)
+    expect(fetchesAfterExternalStop).toBe(0)
+    expect(Object.keys(parked)).toHaveLength(2) // no third fetcher for the new node set
+  })
+
   it('should construct fetchers and workers', async () => {
     fetchManager.start()
 

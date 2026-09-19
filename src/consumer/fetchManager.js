@@ -27,6 +27,7 @@ const createFetchManager = ({
   const workerQueue = createWorkerQueue({ workers })
 
   let fetchers = []
+  let stopping = false
 
   const getFetchers = () => fetchers
 
@@ -66,6 +67,7 @@ const createFetchManager = ({
 
   const start = async () => {
     logger.debug('Starting...')
+    stopping = false
 
     while (true) {
       fetchers = createFetchers()
@@ -73,9 +75,11 @@ const createFetchManager = ({
       try {
         await Promise.all(fetchers.map(fetcher => fetcher.start()))
       } catch (error) {
-        await stop()
+        await stopFetchers()
 
-        if (error instanceof KafkaJSFetcherRebalanceError) {
+        // a rebalance landing while the consumer stops must not build another generation:
+        // `stop()` may already have returned, and nothing would ever stop this one
+        if (!stopping && error instanceof KafkaJSFetcherRebalanceError) {
           logger.debug('Rebalancing fetchers...')
           continue
         }
@@ -87,9 +91,17 @@ const createFetchManager = ({
     }
   }
 
+  // the internal teardown, used by the rebalance path. deliberately does not set
+  // `stopping`: sharing one function would mark every internal rebalance as a stop and
+  // the loop above would never rebalance again.
+  const stopFetchers = async () => {
+    await Promise.all(fetchers.map(fetcher => fetcher.stop()))
+  }
+
   const stop = async () => {
     logger.debug('Stopping fetchers...')
-    await Promise.all(fetchers.map(fetcher => fetcher.stop()))
+    stopping = true
+    await stopFetchers()
     logger.debug('Stopped fetchers')
   }
 
