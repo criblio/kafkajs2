@@ -175,9 +175,10 @@ module.exports = class Connection {
 
       this.authenticatedAt = null
 
-      // abort() marks only the attempt it tears down. Its socket's callbacks check their own
-      // attempt, so a late event from an aborted socket cannot act on a later reconnect.
-      const attempt = { aborted: false }
+      // abort() and disconnect() mark only the attempt whose socket they close. Its callbacks
+      // check their own attempt, so a late event from a closed socket cannot act on a later
+      // reconnect.
+      const attempt = { closed: false }
       this.connectAttempt = attempt
 
       let timeoutId
@@ -190,7 +191,7 @@ module.exports = class Connection {
       }
 
       const onConnect = () => {
-        if (attempt.aborted) return
+        if (attempt.closed) return
         clearTimeout(timeoutId)
         this.cancelPendingConnect = null
         this.connectionStatus = CONNECTION_STATUS.CONNECTED
@@ -199,12 +200,12 @@ module.exports = class Connection {
       }
 
       const onData = data => {
-        if (attempt.aborted) return
+        if (attempt.closed) return
         this.processData(data)
       }
 
       const onEnd = async () => {
-        if (attempt.aborted) return
+        if (attempt.closed) return
         clearTimeout(timeoutId)
 
         const wasConnected = this.isConnected()
@@ -225,7 +226,7 @@ module.exports = class Connection {
       }
 
       const onError = async e => {
-        if (attempt.aborted) return
+        if (attempt.closed) return
         clearTimeout(timeoutId)
         this.cancelPendingConnect = null
 
@@ -242,7 +243,7 @@ module.exports = class Connection {
       }
 
       const onTimeout = async () => {
-        if (attempt.aborted) return
+        if (attempt.closed) return
         this.cancelPendingConnect = null
         const error = new KafkaJSConnectionError('Connection timeout', {
           broker: `${this.host}:${this.port}`,
@@ -308,6 +309,11 @@ module.exports = class Connection {
     this.chunks = []
     this.correlationId = 0
 
+    // Ignore late events from this socket once it is closed, so they cannot act on a later
+    // reconnect. Only after the pending requests above, which still need onData. A connect
+    // still in progress keeps its callbacks so that it can settle.
+    if (this.connectAttempt && !this.cancelPendingConnect) this.connectAttempt.closed = true
+
     if (this.socket) {
       this.socket.end()
       this.socket.unref()
@@ -336,7 +342,7 @@ module.exports = class Connection {
 
     if (!this.isConnected() && !cancelPendingConnect) return
 
-    if (this.connectAttempt) this.connectAttempt.aborted = true
+    if (this.connectAttempt) this.connectAttempt.closed = true
     this.authenticatedAt = null
     this.connectionStatus = CONNECTION_STATUS.DISCONNECTING
     this.logDebug('aborting connection')

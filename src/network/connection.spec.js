@@ -17,6 +17,57 @@ describe('Network > Connection', () => {
     connection && (await connection.disconnect())
   })
 
+  // Sockets that connect only when the test calls their onConnect callback.
+  const manualSockets = () => {
+    const sockets = []
+    const connectCallbacks = []
+    const socketFactory = ({ onConnect }) => {
+      const socket = new EventEmitter()
+      socket.write = jest.fn()
+      socket.end = jest.fn()
+      socket.destroy = jest.fn()
+      socket.unref = jest.fn()
+      sockets.push(socket)
+      connectCallbacks.push(onConnect)
+      return socket
+    }
+    return { sockets, connectCallbacks, socketFactory }
+  }
+
+  // Emits every event the connection listens for, as a socket might after it is closed.
+  const emitLateEvents = async socket => {
+    socket.emit('data', Buffer.from([0, 0, 0, 8, 1, 2]))
+    socket.emit('timeout')
+    socket.emit('error', new Error('late error'))
+    socket.emit('end')
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  // Checks that late events from a closed socket leave the reconnected `connection`, and a
+  // request in flight on it, untouched. Fails that request afterwards so afterEach's
+  // disconnect() does not wait on it.
+  const expectLateEventsIgnored = async (closedSocket, currentSocket) => {
+    const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+    let settled = false
+    const pending = connection.send(apiVersions())
+    pending.then(
+      () => (settled = true),
+      () => (settled = true)
+    )
+    await waitFor(() => connection.requestQueue.inflight.size > 0)
+
+    await emitLateEvents(closedSocket)
+
+    expect(connection.isConnected()).toEqual(true)
+    expect(connection.socket).toBe(currentSocket)
+    expect(currentSocket.end).not.toHaveBeenCalled()
+    expect(connection.bytesBuffered).toEqual(0)
+    expect(settled).toEqual(false)
+
+    connection.abort()
+    await pending.catch(() => {})
+  }
+
   describe('#connect', () => {
     describe('PLAINTEXT', () => {
       beforeEach(() => {
@@ -80,6 +131,42 @@ describe('Network > Connection', () => {
   describe('#disconnect', () => {
     beforeEach(() => {
       connection = new Connection(connectionOpts())
+    })
+
+    describe('followed by a reconnect', () => {
+      let sockets, connectCallbacks
+
+      beforeEach(() => {
+        let socketFactory
+        ;({ sockets, connectCallbacks, socketFactory } = manualSockets())
+        connection = new Connection(connectionOpts({ socketFactory }))
+      })
+
+      test('ignores late events from the disconnected socket', async () => {
+        const connecting = connection.connect()
+        connectCallbacks[0]()
+        await connecting
+        await connection.disconnect()
+
+        const reconnecting = connection.connect()
+        connectCallbacks[1]()
+        await reconnecting
+
+        await expectLateEventsIgnored(sockets[0], sockets[1])
+      })
+
+      test('does not leave a connect in progress hanging', async () => {
+        let settled = false
+        connection
+          .connect()
+          .catch(() => {})
+          .then(() => (settled = true))
+        await connection.disconnect()
+
+        // The socket's own connect callback must still settle the connect.
+        connectCallbacks[0]()
+        await waitFor(() => settled, { maxWait: 1000, ignoreTimeout: false })
+      })
     })
 
     test('disconnects an active connection', async () => {
@@ -426,18 +513,8 @@ describe('Network > Connection', () => {
       let sockets, connectCallbacks
 
       beforeEach(() => {
-        sockets = []
-        connectCallbacks = []
-        const socketFactory = ({ onConnect }) => {
-          const socket = new EventEmitter()
-          socket.write = jest.fn()
-          socket.end = jest.fn()
-          socket.destroy = jest.fn()
-          socket.unref = jest.fn()
-          sockets.push(socket)
-          connectCallbacks.push(onConnect)
-          return socket
-        }
+        let socketFactory
+        ;({ sockets, connectCallbacks, socketFactory } = manualSockets())
         connection = new Connection(connectionOpts({ socketFactory }))
       })
 
@@ -483,29 +560,10 @@ describe('Network > Connection', () => {
       let sockets, connectCallbacks
 
       beforeEach(() => {
-        sockets = []
-        connectCallbacks = []
-        const socketFactory = ({ onConnect }) => {
-          const socket = new EventEmitter()
-          socket.write = jest.fn()
-          socket.end = jest.fn()
-          socket.destroy = jest.fn()
-          socket.unref = jest.fn()
-          sockets.push(socket)
-          connectCallbacks.push(onConnect)
-          return socket
-        }
+        let socketFactory
+        ;({ sockets, connectCallbacks, socketFactory } = manualSockets())
         connection = new Connection(connectionOpts({ socketFactory }))
       })
-
-      // Emits every event the connection listens for, as a custom socket might after destroy().
-      const emitLateEvents = async socket => {
-        socket.emit('data', Buffer.from([0, 0, 0, 8, 1, 2]))
-        socket.emit('timeout')
-        socket.emit('error', new Error('late error'))
-        socket.emit('end')
-        await new Promise(resolve => setImmediate(resolve))
-      }
 
       test.each([
         [
@@ -530,26 +588,7 @@ describe('Network > Connection', () => {
         connectCallbacks[1]()
         await reconnecting
 
-        const apiVersions = requests.ApiVersions.protocol({ version: 0 })
-        let settled = false
-        const pending = connection.send(apiVersions())
-        pending.then(
-          () => (settled = true),
-          () => (settled = true)
-        )
-        await waitFor(() => connection.requestQueue.inflight.size > 0)
-
-        await emitLateEvents(sockets[0])
-
-        expect(connection.isConnected()).toEqual(true)
-        expect(connection.socket).toBe(sockets[1])
-        expect(sockets[1].end).not.toHaveBeenCalled()
-        expect(connection.bytesBuffered).toEqual(0)
-        expect(settled).toEqual(false)
-
-        // Fail the in-flight request so afterEach's disconnect() does not wait on it.
-        connection.abort()
-        await pending.catch(() => {})
+        await expectLateEventsIgnored(sockets[0], sockets[1])
       })
     })
   })
