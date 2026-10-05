@@ -1,6 +1,12 @@
 const Broker = require('../index')
 const { MemberMetadata } = require('../../consumer/assignerProtocol')
-const { secureRandom, createConnectionPool, newLogger, retryProtocol } = require('testHelpers')
+const {
+  secureRandom,
+  createConnectionPool,
+  newLogger,
+  retryProtocol,
+  testIfKafkaAtLeast_2_2,
+} = require('testHelpers')
 
 describe('Broker > JoinGroup', () => {
   let groupId, topicName, seedBroker, broker
@@ -62,5 +68,25 @@ describe('Broker > JoinGroup', () => {
         }),
       ]),
     })
+  })
+
+  // From 2.2 (KIP-394), a new member's first JoinGroup is answered with MEMBER_ID_REQUIRED.
+  testIfKafkaAtLeast_2_2('reports the member id assigned before the join completes', async () => {
+    const onMemberIdAssigned = jest.fn()
+    const response = await broker.joinGroup({
+      groupId,
+      sessionTimeout: 30000,
+      rebalanceTimeout: 60000,
+      groupProtocols: [
+        {
+          name: 'AssignerName',
+          metadata: MemberMetadata.encode({ version: 1, topics: [topicName] }),
+        },
+      ],
+      onMemberIdAssigned,
+    })
+
+    expect(onMemberIdAssigned).toHaveBeenCalledTimes(1)
+    expect(onMemberIdAssigned).toHaveBeenCalledWith(response.memberId)
   })
 })

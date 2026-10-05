@@ -107,6 +107,8 @@ module.exports = class Connection {
 
     this.authHandlers = null
     this.authExpectResponse = false
+    this.cancelPendingConnect = null
+    this.connectAttempt = null
 
     const log = level => (message, extra = {}) => {
       const logFn = this.logger[level]
@@ -173,20 +175,36 @@ module.exports = class Connection {
 
       this.authenticatedAt = null
 
+      // abort() marks only the attempt it tears down. Its socket's callbacks check their own
+      // attempt, so a late event from an aborted socket cannot act on a later reconnect.
+      const attempt = { aborted: false }
+      this.connectAttempt = attempt
+
       let timeoutId
 
-      const onConnect = () => {
+      // Lets abort() cancel a connect that has not finished yet. Without it, a request
+      // waiting on this connect would be sent once the socket opens, after the abort.
+      this.cancelPendingConnect = error => {
         clearTimeout(timeoutId)
+        reject(error)
+      }
+
+      const onConnect = () => {
+        if (attempt.aborted) return
+        clearTimeout(timeoutId)
+        this.cancelPendingConnect = null
         this.connectionStatus = CONNECTION_STATUS.CONNECTED
         this.requestQueue.scheduleRequestTimeoutCheck()
         resolve(true)
       }
 
       const onData = data => {
+        if (attempt.aborted) return
         this.processData(data)
       }
 
       const onEnd = async () => {
+        if (attempt.aborted) return
         clearTimeout(timeoutId)
 
         const wasConnected = this.isConnected()
@@ -207,7 +225,9 @@ module.exports = class Connection {
       }
 
       const onError = async e => {
+        if (attempt.aborted) return
         clearTimeout(timeoutId)
+        this.cancelPendingConnect = null
 
         const error = new KafkaJSConnectionError(`Connection error: ${e.message}`, {
           broker: `${this.host}:${this.port}`,
@@ -222,6 +242,8 @@ module.exports = class Connection {
       }
 
       const onTimeout = async () => {
+        if (attempt.aborted) return
+        this.cancelPendingConnect = null
         const error = new KafkaJSConnectionError('Connection timeout', {
           broker: `${this.host}:${this.port}`,
         })
@@ -253,6 +275,7 @@ module.exports = class Connection {
         })
       } catch (e) {
         clearTimeout(timeoutId)
+        this.cancelPendingConnect = null
         reject(
           new KafkaJSConnectionError(`Failed to connect: ${e.message}`, {
             broker: `${this.host}:${this.port}`,
@@ -293,6 +316,64 @@ module.exports = class Connection {
     this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
     this.logDebug('disconnected')
     return true
+  }
+
+  /**
+   * Fail in-flight requests and destroy the socket without waiting for them.
+   * disconnect() waits for the queue, which cannot unblock a JoinGroup long-poll.
+   * The connection is left DISCONNECTED so a later LeaveGroup can reconnect it.
+   *
+   * Requests are failed with KafkaJSConnectionError rather than KafkaJSConnectionClosedError:
+   * the broker disconnects its whole pool (Fetch included) on a closed error, which would
+   * race the LeaveGroup reconnecting this connection.
+   *
+   * A connect that is still in progress is rejected, so a request waiting on it is never sent.
+   * @public
+   */
+  abort() {
+    const cancelPendingConnect = this.cancelPendingConnect
+    this.cancelPendingConnect = null
+
+    if (!this.isConnected() && !cancelPendingConnect) return
+
+    if (this.connectAttempt) this.connectAttempt.aborted = true
+    this.authenticatedAt = null
+    this.connectionStatus = CONNECTION_STATUS.DISCONNECTING
+    this.logDebug('aborting connection')
+
+    // A pending SASL exchange is not in the request queue. Fail it so the shared
+    // authenticate promise settles and the next send can authenticate again.
+    if (this.authHandlers) {
+      this.authHandlers.onError()
+    }
+
+    this.rejectRequests(
+      new KafkaJSConnectionError('Connection aborted', {
+        broker: `${this.host}:${this.port}`,
+      })
+    )
+    this.requestQueue.destroy()
+
+    this.bytesNeeded = Decoder.int32Size()
+    this.bytesBuffered = 0
+    this.chunks = []
+    this.correlationId = 0
+
+    if (this.socket) {
+      this.socket.destroy()
+      this.socket.unref()
+      this.socket = null
+    }
+
+    this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
+
+    if (cancelPendingConnect) {
+      cancelPendingConnect(
+        new KafkaJSConnectionError('Connection aborted', {
+          broker: `${this.host}:${this.port}`,
+        })
+      )
+    }
   }
 
   /**

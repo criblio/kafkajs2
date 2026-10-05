@@ -3,7 +3,8 @@ const sleep = require('../utils/sleep')
 const { requests } = require('../protocol/requests')
 const Decoder = require('../protocol/decoder')
 const Encoder = require('../protocol/encoder')
-const { KafkaJSRequestTimeoutError } = require('../errors')
+const { KafkaJSRequestTimeoutError, KafkaJSConnectionError } = require('../errors')
+const waitFor = require('../utils/waitFor')
 const Connection = require('./connection')
 const { CONNECTION_STATUS } = require('./connectionStatus')
 const EventEmitter = require('events')
@@ -228,10 +229,13 @@ describe('Network > Connection', () => {
         })
       )
       const originalProcessData = connection.processData
+      // The delayed response lands after this test ends, when later tests have reassigned the
+      // shared `connection`. Capture this test's instance so the late data is not fed to theirs.
+      const timedOutConnection = connection
 
-      connection.processData = async data => {
+      timedOutConnection.processData = async data => {
         await sleep(100)
-        originalProcessData.apply(connection, [data])
+        originalProcessData.apply(timedOutConnection, [data])
       }
 
       await connection.connect()
@@ -365,6 +369,187 @@ describe('Network > Connection', () => {
         await expect(connection.send(protocol)).rejects.toBeTruthy()
 
         expect(errorStub).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe('#abort', () => {
+    const fakeSocketFactory = () => ({ onConnect }) => {
+      const socket = new EventEmitter()
+      socket.write = jest.fn()
+      socket.end = jest.fn()
+      socket.destroy = jest.fn()
+      socket.unref = jest.fn()
+      setImmediate(onConnect)
+      return socket
+    }
+
+    beforeEach(async () => {
+      connection = new Connection(connectionOpts({ socketFactory: fakeSocketFactory() }))
+      await connection.connect()
+    })
+
+    test('fails queued requests with an error the broker does not treat as closed', async () => {
+      const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+      const pending = connection.send(apiVersions())
+      await waitFor(() => connection.requestQueue.inflight.size > 0)
+
+      connection.abort()
+
+      const error = await pending.catch(e => e)
+      expect(error).toBeInstanceOf(KafkaJSConnectionError)
+      expect(error.name).toEqual('KafkaJSConnectionError')
+      expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.DISCONNECTED)
+    })
+
+    test('fails a pending SASL exchange that is not in the request queue', async () => {
+      const authRequest = connection.sendAuthRequest({
+        request: { encode: async () => Buffer.from([]) },
+      })
+      await waitFor(() => connection.socket.write.mock.calls.length > 0)
+      expect(connection.authHandlers).not.toBeNull()
+
+      connection.abort()
+
+      await expect(authRequest).rejects.toBeInstanceOf(KafkaJSConnectionError)
+      expect(connection.authHandlers).toBeNull()
+    })
+
+    test('leaves the connection ready to reconnect', async () => {
+      connection.abort()
+
+      await expect(connection.connect()).resolves.toEqual(true)
+      expect(connection.isConnected()).toEqual(true)
+    })
+
+    describe('while connecting', () => {
+      let sockets, connectCallbacks
+
+      beforeEach(() => {
+        sockets = []
+        connectCallbacks = []
+        const socketFactory = ({ onConnect }) => {
+          const socket = new EventEmitter()
+          socket.write = jest.fn()
+          socket.end = jest.fn()
+          socket.destroy = jest.fn()
+          socket.unref = jest.fn()
+          sockets.push(socket)
+          connectCallbacks.push(onConnect)
+          return socket
+        }
+        connection = new Connection(connectionOpts({ socketFactory }))
+      })
+
+      test('rejects the pending connect and destroys the socket', async () => {
+        const connecting = connection.connect()
+
+        connection.abort()
+
+        const error = await connecting.catch(e => e)
+        expect(error).toBeInstanceOf(KafkaJSConnectionError)
+        expect(error.name).toEqual('KafkaJSConnectionError')
+        expect(sockets[0].destroy).toHaveBeenCalled()
+        expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.DISCONNECTED)
+      })
+
+      test('never sends a request that was waiting on the connect', async () => {
+        const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+        const pending = connection.connect().then(() => connection.send(apiVersions()))
+
+        connection.abort()
+        // A late connect callback from the destroyed socket must not revive the connection.
+        connectCallbacks[0]()
+
+        await expect(pending).rejects.toBeInstanceOf(KafkaJSConnectionError)
+        expect(sockets[0].write).not.toHaveBeenCalled()
+        expect(connection.isConnected()).toEqual(false)
+      })
+
+      test('leaves the connection ready to reconnect', async () => {
+        const connecting = connection.connect().catch(e => e)
+        connection.abort()
+        await connecting
+
+        const reconnecting = connection.connect()
+        connectCallbacks[1]()
+
+        await expect(reconnecting).resolves.toEqual(true)
+        expect(connection.isConnected()).toEqual(true)
+      })
+    })
+
+    describe('after a reconnect', () => {
+      let sockets, connectCallbacks
+
+      beforeEach(() => {
+        sockets = []
+        connectCallbacks = []
+        const socketFactory = ({ onConnect }) => {
+          const socket = new EventEmitter()
+          socket.write = jest.fn()
+          socket.end = jest.fn()
+          socket.destroy = jest.fn()
+          socket.unref = jest.fn()
+          sockets.push(socket)
+          connectCallbacks.push(onConnect)
+          return socket
+        }
+        connection = new Connection(connectionOpts({ socketFactory }))
+      })
+
+      // Emits every event the connection listens for, as a custom socket might after destroy().
+      const emitLateEvents = async socket => {
+        socket.emit('data', Buffer.from([0, 0, 0, 8, 1, 2]))
+        socket.emit('timeout')
+        socket.emit('error', new Error('late error'))
+        socket.emit('end')
+        await new Promise(resolve => setImmediate(resolve))
+      }
+
+      test.each([
+        [
+          'while connected',
+          async () => {
+            const connecting = connection.connect()
+            connectCallbacks[0]()
+            await connecting
+          },
+        ],
+        [
+          'while connecting',
+          async () => {
+            connection.connect().catch(() => {})
+          },
+        ],
+      ])('ignores late events from a socket aborted %s', async (_, openFirstSocket) => {
+        await openFirstSocket()
+        connection.abort()
+
+        const reconnecting = connection.connect()
+        connectCallbacks[1]()
+        await reconnecting
+
+        const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+        let settled = false
+        const pending = connection.send(apiVersions())
+        pending.then(
+          () => (settled = true),
+          () => (settled = true)
+        )
+        await waitFor(() => connection.requestQueue.inflight.size > 0)
+
+        await emitLateEvents(sockets[0])
+
+        expect(connection.isConnected()).toEqual(true)
+        expect(connection.socket).toBe(sockets[1])
+        expect(sockets[1].end).not.toHaveBeenCalled()
+        expect(connection.bytesBuffered).toEqual(0)
+        expect(settled).toEqual(false)
+
+        // Fail the in-flight request so afterEach's disconnect() does not wait on it.
+        connection.abort()
+        await pending.catch(() => {})
       })
     })
   })

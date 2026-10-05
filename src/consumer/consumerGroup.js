@@ -161,10 +161,14 @@ module.exports = class ConsumerGroup {
     await this.cluster.refreshMetadataIfNecessary()
   }
 
-  async [PRIVATE.JOIN]() {
+  async [PRIVATE.JOIN]({ shouldAbort } = {}) {
     const { groupId, sessionTimeout, rebalanceTimeout } = this
 
     this.coordinator = await this.cluster.findGroupCoordinator({ groupId })
+
+    // The coordinator lookup retries on its own, so stop() may have started meanwhile.
+    // A JoinGroup sent now would sit ahead of LeaveGroup on the coordinator connection.
+    if (typeof shouldAbort === 'function' && shouldAbort()) return
 
     const groupData = await this.coordinator.joinGroup({
       groupId,
@@ -176,6 +180,13 @@ module.exports = class ConsumerGroup {
           topics: this.topicsSubscribed,
         })
       ),
+      // A join without a member id (after UNKNOWN_MEMBER_ID) gets its new id before the
+      // request the broker holds, from Kafka 2.2 (KIP-394). Keep it, so leave() can remove
+      // the member if stop() aborts that request. Older brokers send the id only in the held
+      // response; a member aborted there stays in the group until its session times out.
+      onMemberIdAssigned: memberId => {
+        this.memberId = memberId
+      },
     })
 
     this.generationId = groupData.generationId
@@ -191,6 +202,14 @@ module.exports = class ConsumerGroup {
       await this.coordinator.leaveGroup({ groupId, memberId })
       this.memberId = null
     }
+  }
+
+  /**
+   * Fail in-flight group requests on the coordinator connection so a blocked JoinGroup
+   * cannot outlive consumer.stop(). Fetch traffic uses the other pool connection.
+   */
+  abortCoordinatorRequests() {
+    if (this.coordinator) this.coordinator.abortGroupConnection()
   }
 
   async [PRIVATE.SYNC]() {
@@ -328,11 +347,22 @@ module.exports = class ConsumerGroup {
     })
   }
 
-  joinAndSync() {
+  joinAndSync({ shouldAbort } = {}) {
     const startJoin = Date.now()
+    const abortIfStopped = bail => {
+      if (typeof shouldAbort === 'function' && shouldAbort()) {
+        bail(new KafkaJSNonRetriableError('The consumer is not running'))
+        return true
+      }
+      return false
+    }
+
     return this.retrier(async bail => {
+      if (abortIfStopped(bail)) return
+
       try {
-        await this[PRIVATE.JOIN]()
+        await this[PRIVATE.JOIN]({ shouldAbort })
+        if (abortIfStopped(bail)) return
         await this[PRIVATE.SYNC]()
 
         const memberAssignment = this.assigned().reduce(
@@ -353,6 +383,8 @@ module.exports = class ConsumerGroup {
         this.instrumentationEmitter.emit(GROUP_JOIN, payload)
         this.logger.info('Consumer has joined the group', payload)
       } catch (e) {
+        if (abortIfStopped(bail)) return
+
         if (isRebalancing(e)) {
           // Rebalance in progress isn't a retriable protocol error since the consumer
           // has to go through find coordinator and join again before it can
