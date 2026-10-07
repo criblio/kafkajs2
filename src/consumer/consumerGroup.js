@@ -180,13 +180,6 @@ module.exports = class ConsumerGroup {
           topics: this.topicsSubscribed,
         })
       ),
-      // A join without a member id (after UNKNOWN_MEMBER_ID) gets its new id before the
-      // request the broker holds, from Kafka 2.2 (KIP-394). Keep it, so leave() can remove
-      // the member if stop() aborts that request. Older brokers send the id only in the held
-      // response; a member aborted there stays in the group until its session times out.
-      onMemberIdAssigned: memberId => {
-        this.memberId = memberId
-      },
     })
 
     this.generationId = groupData.generationId

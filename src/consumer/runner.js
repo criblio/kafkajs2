@@ -121,8 +121,6 @@ module.exports = class Runner extends EventEmitter {
   }
 
   async reJoinDueToUnknownMember(error) {
-    if (!this.running) return
-
     this.logger.error('The coordinator is not aware of this member, re-joining the group', {
       groupId: this.consumerGroup.groupId,
       memberId: this.consumerGroup.memberId,
@@ -130,12 +128,13 @@ module.exports = class Runner extends EventEmitter {
     })
 
     this.consumerGroup.memberId = null
-    await this.joinAndSyncUnlessStopped()
+    await this.consumerGroup.joinAndSync()
   }
 
   /**
-   * JoinGroup can block for rebalanceTimeout. stop() must be able to abandon that wait and
-   * leave the group; otherwise shutdown sits in waitForConsumer until the join finishes.
+   * A rebalance rejoin's JoinGroup can block for rebalanceTimeout. stop() must be able to
+   * abandon that wait and leave the group; otherwise shutdown sits in waitForConsumer until
+   * the join finishes. Called from reJoinDueToRebalance only.
    * The join promise itself may still be in flight. It is failed separately by aborting the
    * coordinator connection, and a late resolution is ignored once `running` is false.
    */

@@ -107,8 +107,6 @@ module.exports = class Connection {
 
     this.authHandlers = null
     this.authExpectResponse = false
-    this.cancelPendingConnect = null
-    this.connectAttempt = null
 
     const log = level => (message, extra = {}) => {
       const logFn = this.logger[level]
@@ -175,37 +173,20 @@ module.exports = class Connection {
 
       this.authenticatedAt = null
 
-      // abort() and disconnect() mark only the attempt whose socket they close. Its callbacks
-      // check their own attempt, so a late event from a closed socket cannot act on a later
-      // reconnect.
-      const attempt = { closed: false }
-      this.connectAttempt = attempt
-
       let timeoutId
 
-      // Lets abort() cancel a connect that has not finished yet. Without it, a request
-      // waiting on this connect would be sent once the socket opens, after the abort.
-      this.cancelPendingConnect = error => {
-        clearTimeout(timeoutId)
-        reject(error)
-      }
-
       const onConnect = () => {
-        if (attempt.closed) return
         clearTimeout(timeoutId)
-        this.cancelPendingConnect = null
         this.connectionStatus = CONNECTION_STATUS.CONNECTED
         this.requestQueue.scheduleRequestTimeoutCheck()
         resolve(true)
       }
 
       const onData = data => {
-        if (attempt.closed) return
         this.processData(data)
       }
 
       const onEnd = async () => {
-        if (attempt.closed) return
         clearTimeout(timeoutId)
 
         const wasConnected = this.isConnected()
@@ -226,9 +207,7 @@ module.exports = class Connection {
       }
 
       const onError = async e => {
-        if (attempt.closed) return
         clearTimeout(timeoutId)
-        this.cancelPendingConnect = null
 
         const error = new KafkaJSConnectionError(`Connection error: ${e.message}`, {
           broker: `${this.host}:${this.port}`,
@@ -243,8 +222,6 @@ module.exports = class Connection {
       }
 
       const onTimeout = async () => {
-        if (attempt.closed) return
-        this.cancelPendingConnect = null
         const error = new KafkaJSConnectionError('Connection timeout', {
           broker: `${this.host}:${this.port}`,
         })
@@ -276,7 +253,6 @@ module.exports = class Connection {
         })
       } catch (e) {
         clearTimeout(timeoutId)
-        this.cancelPendingConnect = null
         reject(
           new KafkaJSConnectionError(`Failed to connect: ${e.message}`, {
             broker: `${this.host}:${this.port}`,
@@ -309,11 +285,6 @@ module.exports = class Connection {
     this.chunks = []
     this.correlationId = 0
 
-    // Ignore late events from this socket once it is closed, so they cannot act on a later
-    // reconnect. Only after the pending requests above, which still need onData. A connect
-    // still in progress keeps its callbacks so that it can settle.
-    if (this.connectAttempt && !this.cancelPendingConnect) this.connectAttempt.closed = true
-
     if (this.socket) {
       this.socket.end()
       this.socket.unref()
@@ -333,18 +304,13 @@ module.exports = class Connection {
    * the broker disconnects its whole pool (Fetch included) on a closed error, which would
    * race the LeaveGroup reconnecting this connection.
    *
-   * A connect that is still in progress is rejected, so a request waiting on it is never sent.
+   * A connect that has not finished is left alone.
    * @public
    */
   abort() {
-    const cancelPendingConnect = this.cancelPendingConnect
-    this.cancelPendingConnect = null
+    if (!this.isConnected()) return
 
-    if (!this.isConnected() && !cancelPendingConnect) return
-
-    if (this.connectAttempt) this.connectAttempt.closed = true
     this.authenticatedAt = null
-    this.connectionStatus = CONNECTION_STATUS.DISCONNECTING
     this.logDebug('aborting connection')
 
     // A pending SASL exchange is not in the request queue. Fail it so the shared
@@ -365,20 +331,13 @@ module.exports = class Connection {
     this.chunks = []
     this.correlationId = 0
 
+    // Mark disconnected before destroy(), so a handler running from destroy() does not
+    // still see this connection as up.
+    this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
+
     if (this.socket) {
       this.socket.destroy()
       this.socket.unref()
-      this.socket = null
-    }
-
-    this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
-
-    if (cancelPendingConnect) {
-      cancelPendingConnect(
-        new KafkaJSConnectionError('Connection aborted', {
-          broker: `${this.host}:${this.port}`,
-        })
-      )
     }
   }
 

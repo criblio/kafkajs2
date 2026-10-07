@@ -297,7 +297,6 @@ const testIfKafkaVersionGTE = version => testIfKafkaVersion(version, semver.gte)
 const testIfKafkaAtMost_0_10 = testIfKafkaVersionLTE('0.10')
 const testIfKafkaAtLeast_0_11 = testIfKafkaVersionGTE('0.11')
 const testIfKafkaAtLeast_1_1_0 = testIfKafkaVersionGTE('1.1')
-const testIfKafkaAtLeast_2_2 = testIfKafkaVersionGTE('2.2')
 
 const flakyTest = (description, callback, testFn = test) =>
   testFn(`[flaky] ${description}`, callback)
@@ -368,7 +367,6 @@ module.exports = {
   testIfKafkaAtMost_0_10,
   testIfKafkaAtLeast_0_11,
   testIfKafkaAtLeast_1_1_0,
-  testIfKafkaAtLeast_2_2,
   flakyTest,
   describeIfOauthbearerEnabled,
   describeIfOauthbearerDisabled,

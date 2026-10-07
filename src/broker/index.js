@@ -404,8 +404,6 @@ module.exports = class Broker {
    * @param {string} [request.protocolType="consumer"] Unique name for class of protocols implemented by group
    * @param {Array} request.groupProtocols List of protocols that the member supports (assignment strategy)
    *                                [{ name: 'AssignerName', metadata: '{"version": 1, "topics": []}' }]
-   * @param {(memberId: string) => void} [request.onMemberIdAssigned] Called with the id the broker
-   *                                       assigns a new member, before the join completes
    * @returns {Promise}
    */
   async joinGroup({
@@ -415,7 +413,6 @@ module.exports = class Broker {
     memberId = '',
     protocolType = 'consumer',
     groupProtocols,
-    onMemberIdAssigned,
   }) {
     const joinGroup = this.lookupRequest(apiKeys.JoinGroup, requests.JoinGroup)
     const makeRequest = (assignedMemberId = memberId) =>
@@ -434,9 +431,6 @@ module.exports = class Broker {
       return await makeRequest()
     } catch (error) {
       if (error.name === 'KafkaJSMemberIdRequired') {
-        // The broker already knows this member. Report the id so the caller can still
-        // leave the group if the second request is abandoned.
-        if (typeof onMemberIdAssigned === 'function') onMemberIdAssigned(error.memberId)
         return makeRequest(error.memberId)
       }
 

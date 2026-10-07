@@ -507,55 +507,6 @@ describe('Consumer > Runner', () => {
     }
   })
 
-  it('should leave the group when shutdown races a rejoin after UNKNOWN_MEMBER_ID', async () => {
-    let releaseJoin
-    consumerGroup.groupId = 'group-id'
-    consumerGroup.memberId = 'member-id'
-    consumerGroup.leave = jest.fn()
-    consumerGroup.abortCoordinatorRequests = jest.fn()
-    consumerGroup.getNodeIds = jest.fn(() => [1])
-    consumerGroup.fetch = jest.fn(async () => [])
-    consumerGroup.heartbeat = jest.fn(async () => {
-      throw unknownMemberError()
-    })
-    consumerGroup.joinAndSync.mockImplementation(() => {
-      if (consumerGroup.joinAndSync.mock.calls.length === 1) {
-        return Promise.resolve()
-      }
-      return new Promise(resolve => {
-        releaseJoin = resolve
-      })
-    })
-
-    await runner.start()
-    await waitFor(() => typeof releaseJoin === 'function', {
-      maxWait: 2000,
-      ignoreTimeout: false,
-      timeoutMessage: 'The unknown member never re-entered joinAndSync',
-    })
-
-    const stopped = runner.stop()
-    let stopSettled = false
-    stopped.then(() => {
-      stopSettled = true
-    })
-
-    try {
-      // The join is never released before this, so stop() must settle on its own.
-      await waitFor(() => stopSettled, {
-        maxWait: 2000,
-        ignoreTimeout: false,
-        timeoutMessage: 'stop() waited for the in-flight rejoin',
-      })
-      expect(consumerGroup.abortCoordinatorRequests).toHaveBeenCalledTimes(1)
-      expect(consumerGroup.leave).toHaveBeenCalledTimes(1)
-      expect(onCrash).not.toHaveBeenCalled()
-    } finally {
-      releaseJoin()
-      await stopped
-    }
-  })
-
   it('does not abort coordinator requests when shutdown has no in-flight rejoin', async () => {
     consumerGroup.leave = jest.fn()
     consumerGroup.abortCoordinatorRequests = jest.fn()

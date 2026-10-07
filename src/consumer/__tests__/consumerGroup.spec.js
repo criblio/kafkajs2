@@ -1,6 +1,5 @@
 const ConsumerGroup = require('../consumerGroup')
 const { newLogger } = require('testHelpers')
-const { KafkaJSConnectionError } = require('../../errors')
 
 describe('ConsumerGroup', () => {
   let consumerGroup
@@ -40,25 +39,6 @@ describe('ConsumerGroup', () => {
       )
       expect(consumerGroup.cluster.findGroupCoordinator).toHaveBeenCalledTimes(1)
       expect(coordinator.joinGroup).not.toHaveBeenCalled()
-    })
-
-    it('keeps the member id assigned before an aborted join', async () => {
-      let running = true
-      const coordinator = {
-        joinGroup: jest.fn(async ({ onMemberIdAssigned }) => {
-          onMemberIdAssigned('member-1')
-          running = false
-          throw new KafkaJSConnectionError('Connection aborted')
-        }),
-      }
-      consumerGroup.assigners = []
-      consumerGroup.cluster = { findGroupCoordinator: jest.fn(async () => coordinator) }
-
-      await expect(consumerGroup.joinAndSync({ shouldAbort: () => !running })).rejects.toThrow(
-        /not running/
-      )
-      // leave() needs this id to remove the member the broker already registered.
-      expect(consumerGroup.memberId).toEqual('member-1')
     })
   })
 
