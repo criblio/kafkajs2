@@ -296,6 +296,52 @@ module.exports = class Connection {
   }
 
   /**
+   * Fail in-flight requests and destroy the socket without waiting for them.
+   * disconnect() waits for the queue, which cannot unblock a JoinGroup long-poll.
+   * The connection is left DISCONNECTED so a later LeaveGroup can reconnect it.
+   *
+   * Requests are failed with KafkaJSConnectionError rather than KafkaJSConnectionClosedError:
+   * the broker disconnects its whole pool (Fetch included) on a closed error, which would
+   * race the LeaveGroup reconnecting this connection.
+   *
+   * A connect that has not finished is left alone.
+   * @public
+   */
+  abort() {
+    if (!this.isConnected()) return
+
+    this.authenticatedAt = null
+    this.logDebug('aborting connection')
+
+    // A pending SASL exchange is not in the request queue. Fail it so the shared
+    // authenticate promise settles and the next send can authenticate again.
+    if (this.authHandlers) {
+      this.authHandlers.onError()
+    }
+
+    this.rejectRequests(
+      new KafkaJSConnectionError('Connection aborted', {
+        broker: `${this.host}:${this.port}`,
+      })
+    )
+    this.requestQueue.destroy()
+
+    this.bytesNeeded = Decoder.int32Size()
+    this.bytesBuffered = 0
+    this.chunks = []
+    this.correlationId = 0
+
+    // Mark disconnected before destroy(), so a handler running from destroy() does not
+    // still see this connection as up.
+    this.connectionStatus = CONNECTION_STATUS.DISCONNECTED
+
+    if (this.socket) {
+      this.socket.destroy()
+      this.socket.unref()
+    }
+  }
+
+  /**
    * @public
    * @returns {boolean}
    */

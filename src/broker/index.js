@@ -5,6 +5,7 @@ const { KafkaJSNonRetriableError } = require('../errors')
 const apiKeys = require('../protocol/requests/apiKeys')
 const shuffle = require('../utils/shuffle')
 const mapValues = require('../utils/mapValues')
+const { DEFAULT_CONNECTION } = require('../network/connectionPool')
 const { BROKER_API_VERSIONS } = require('./instrumentationEvents')
 
 const PRIVATE = {
@@ -144,6 +145,17 @@ module.exports = class Broker {
    */
   async disconnect() {
     await this.connectionPool.destroy()
+  }
+
+  /**
+   * Fail in-flight requests on the default connection, which carries the group protocol along
+   * with every other non-Fetch request. Fetch uses a separate connection and is left alone
+   * so a blocked JoinGroup can be abandoned without tearing down partition fetches.
+   * Connection#abort fails requests with an error that SEND_REQUEST does not turn into
+   * a full broker disconnect.
+   */
+  abortGroupConnection() {
+    this.connectionPool.abortConnection(DEFAULT_CONNECTION)
   }
 
   /**

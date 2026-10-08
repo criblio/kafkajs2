@@ -62,6 +62,7 @@ module.exports = class Runner extends EventEmitter {
 
     this.running = false
     this.consuming = false
+    this.abortInFlightJoin = null
 
     this.heartbeat = sharedPromiseTo(async () => {
       try {
@@ -103,6 +104,8 @@ module.exports = class Runner extends EventEmitter {
   }
 
   async reJoinDueToRebalance(error) {
+    if (!this.running) return
+
     this.logger.warn('The group is rebalancing, re-joining', {
       groupId: this.consumerGroup.groupId,
       memberId: this.consumerGroup.memberId,
@@ -114,7 +117,7 @@ module.exports = class Runner extends EventEmitter {
       memberId: this.consumerGroup.memberId,
     })
 
-    await this.consumerGroup.joinAndSync()
+    await this.joinAndSyncUnlessStopped()
   }
 
   async reJoinDueToUnknownMember(error) {
@@ -126,6 +129,34 @@ module.exports = class Runner extends EventEmitter {
 
     this.consumerGroup.memberId = null
     await this.consumerGroup.joinAndSync()
+  }
+
+  /**
+   * A rebalance rejoin's JoinGroup can block for rebalanceTimeout. stop() must be able to
+   * abandon that wait and leave the group; otherwise shutdown sits in waitForConsumer until
+   * the join finishes. Called from reJoinDueToRebalance only.
+   * The join promise itself may still be in flight. It is failed separately by aborting the
+   * coordinator connection, and a late resolution is ignored once `running` is false.
+   */
+  joinAndSyncUnlessStopped() {
+    if (!this.running) return Promise.resolve()
+
+    let abort
+    const stopped = new Promise(resolve => {
+      abort = resolve
+    })
+    this.abortInFlightJoin = abort
+
+    const join = Promise.resolve()
+      .then(() => this.consumerGroup.joinAndSync({ shouldAbort: () => !this.running }))
+      .catch(error => {
+        if (!this.running) return
+        throw error
+      })
+
+    return Promise.race([join, stopped]).finally(() => {
+      if (this.abortInFlightJoin === abort) this.abortInFlightJoin = null
+    })
   }
 
   scheduleFetchManager() {
@@ -256,6 +287,18 @@ module.exports = class Runner extends EventEmitter {
     this.running = false
 
     try {
+      // Abort only while a rejoin is in flight. OffsetCommit and Heartbeat share the
+      // coordinator connection, so aborting it on a normal stop fails the last commit
+      // with nothing left to retry it. Release the rejoin wait after the abort so
+      // JoinGroup cannot complete membership after leave().
+      if (this.abortInFlightJoin) {
+        if (typeof this.consumerGroup.abortCoordinatorRequests === 'function') {
+          this.consumerGroup.abortCoordinatorRequests()
+        }
+        const abort = this.abortInFlightJoin
+        this.abortInFlightJoin = null
+        abort()
+      }
       await this.fetchManager.stop()
       await this.waitForConsumer()
       await this.consumerGroup.leave()

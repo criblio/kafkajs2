@@ -22,6 +22,26 @@ describe('ConsumerGroup', () => {
     })
   })
 
+  describe('joinAndSync', () => {
+    it('does not send JoinGroup when shutdown starts during the coordinator lookup', async () => {
+      let running = true
+      const coordinator = { joinGroup: jest.fn() }
+      consumerGroup.assigners = []
+      consumerGroup.cluster = {
+        findGroupCoordinator: jest.fn(async () => {
+          running = false
+          return coordinator
+        }),
+      }
+
+      await expect(consumerGroup.joinAndSync({ shouldAbort: () => !running })).rejects.toThrow(
+        /not running/
+      )
+      expect(consumerGroup.cluster.findGroupCoordinator).toHaveBeenCalledTimes(1)
+      expect(coordinator.joinGroup).not.toHaveBeenCalled()
+    })
+  })
+
   describe('commitOffsets', () => {
     it("calls the offset manager's commitOffsets", async () => {
       consumerGroup.offsetManager = { commitOffsets: jest.fn(() => Promise.resolve()) }

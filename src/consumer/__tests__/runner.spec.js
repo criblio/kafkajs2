@@ -452,6 +452,73 @@ describe('Consumer > Runner', () => {
     })
   })
 
+  /**
+   * Shutdown can land after a rebalance has already entered joinAndSync. stop() must
+   * return and leave the group without waiting for that join. The join stays parked
+   * until the assertions finish, then it is released so a failure cannot hang the suite.
+   */
+  it('should leave the group when shutdown races an in-flight rejoin', async () => {
+    let releaseJoin
+    consumerGroup.groupId = 'group-id'
+    consumerGroup.memberId = 'member-id'
+    consumerGroup.leave = jest.fn()
+    consumerGroup.abortCoordinatorRequests = jest.fn()
+    consumerGroup.getNodeIds = jest.fn(() => [1])
+    consumerGroup.fetch = jest.fn(async () => [])
+    consumerGroup.heartbeat = jest.fn(async () => {
+      throw rebalancingError()
+    })
+    consumerGroup.joinAndSync.mockImplementation(() => {
+      if (consumerGroup.joinAndSync.mock.calls.length === 1) {
+        return Promise.resolve()
+      }
+      return new Promise(resolve => {
+        releaseJoin = resolve
+      })
+    })
+
+    await runner.start()
+    await waitFor(() => typeof releaseJoin === 'function', {
+      maxWait: 2000,
+      ignoreTimeout: false,
+      timeoutMessage: 'The rebalance never re-entered joinAndSync',
+    })
+
+    const stopped = runner.stop()
+    let stopSettled = false
+    stopped.then(() => {
+      stopSettled = true
+    })
+
+    try {
+      // The join is never released before this, so stop() must settle on its own.
+      await waitFor(() => stopSettled, {
+        maxWait: 2000,
+        ignoreTimeout: false,
+        timeoutMessage: 'stop() waited for the in-flight rejoin',
+      })
+      expect(consumerGroup.abortCoordinatorRequests).toHaveBeenCalledTimes(1)
+      expect(consumerGroup.leave).toHaveBeenCalledTimes(1)
+      expect(consumerGroup.joinAndSync).toHaveBeenCalledTimes(2)
+      expect(onCrash).not.toHaveBeenCalled()
+    } finally {
+      if (releaseJoin) releaseJoin()
+      await stopped
+    }
+  })
+
+  it('does not abort coordinator requests when shutdown has no in-flight rejoin', async () => {
+    consumerGroup.leave = jest.fn()
+    consumerGroup.abortCoordinatorRequests = jest.fn()
+    runner.scheduleFetchManager = jest.fn()
+
+    await runner.start()
+    await runner.stop()
+
+    expect(consumerGroup.abortCoordinatorRequests).not.toHaveBeenCalled()
+    expect(consumerGroup.leave).toHaveBeenCalledTimes(1)
+  })
+
   it('should "commit" offsets during fetch', async () => {
     const batch = new Batch(topicName, 0, {
       partition,

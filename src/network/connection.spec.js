@@ -3,7 +3,8 @@ const sleep = require('../utils/sleep')
 const { requests } = require('../protocol/requests')
 const Decoder = require('../protocol/decoder')
 const Encoder = require('../protocol/encoder')
-const { KafkaJSRequestTimeoutError } = require('../errors')
+const { KafkaJSRequestTimeoutError, KafkaJSConnectionError } = require('../errors')
+const waitFor = require('../utils/waitFor')
 const Connection = require('./connection')
 const { CONNECTION_STATUS } = require('./connectionStatus')
 const EventEmitter = require('events')
@@ -194,10 +195,12 @@ describe('Network > Connection', () => {
       const protocol = apiVersions()
       connection = new Connection(connectionOpts({ maxInFlightRequests: 2 }))
       const originalProcessData = connection.processData
+      // The delayed response can land after a later test has reassigned `connection`.
+      const delayedConnection = connection
 
-      connection.processData = async data => {
+      delayedConnection.processData = async data => {
         await sleep(100)
-        originalProcessData.apply(connection, [data])
+        originalProcessData.apply(delayedConnection, [data])
       }
 
       await connection.connect()
@@ -228,10 +231,12 @@ describe('Network > Connection', () => {
         })
       )
       const originalProcessData = connection.processData
+      // The delayed response can land after a later test has reassigned `connection`.
+      const delayedConnection = connection
 
-      connection.processData = async data => {
+      delayedConnection.processData = async data => {
         await sleep(100)
-        originalProcessData.apply(connection, [data])
+        originalProcessData.apply(delayedConnection, [data])
       }
 
       await connection.connect()
@@ -366,6 +371,56 @@ describe('Network > Connection', () => {
 
         expect(errorStub).not.toHaveBeenCalled()
       })
+    })
+  })
+
+  describe('#abort', () => {
+    const fakeSocketFactory = () => ({ onConnect }) => {
+      const socket = new EventEmitter()
+      socket.write = jest.fn()
+      socket.end = jest.fn()
+      socket.destroy = jest.fn()
+      socket.unref = jest.fn()
+      setImmediate(onConnect)
+      return socket
+    }
+
+    beforeEach(async () => {
+      connection = new Connection(connectionOpts({ socketFactory: fakeSocketFactory() }))
+      await connection.connect()
+    })
+
+    test('fails queued requests with an error the broker does not treat as closed', async () => {
+      const apiVersions = requests.ApiVersions.protocol({ version: 0 })
+      const pending = connection.send(apiVersions())
+      await waitFor(() => connection.requestQueue.inflight.size > 0)
+
+      connection.abort()
+
+      const error = await pending.catch(e => e)
+      expect(error).toBeInstanceOf(KafkaJSConnectionError)
+      expect(error.name).toEqual('KafkaJSConnectionError')
+      expect(connection.connectionStatus).toEqual(CONNECTION_STATUS.DISCONNECTED)
+    })
+
+    test('fails a pending SASL exchange that is not in the request queue', async () => {
+      const authRequest = connection.sendAuthRequest({
+        request: { encode: async () => Buffer.from([]) },
+      })
+      await waitFor(() => connection.socket.write.mock.calls.length > 0)
+      expect(connection.authHandlers).not.toBeNull()
+
+      connection.abort()
+
+      await expect(authRequest).rejects.toBeInstanceOf(KafkaJSConnectionError)
+      expect(connection.authHandlers).toBeNull()
+    })
+
+    test('leaves the connection ready to reconnect', async () => {
+      connection.abort()
+
+      await expect(connection.connect()).resolves.toEqual(true)
+      expect(connection.isConnected()).toEqual(true)
     })
   })
 

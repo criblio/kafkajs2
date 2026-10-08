@@ -1,6 +1,9 @@
 const apiKeys = require('../protocol/requests/apiKeys')
 const Connection = require('./connection')
 
+// Pool slot that carries every request except Fetch, including the group protocol.
+const DEFAULT_CONNECTION = 0
+
 module.exports = class ConnectionPool {
   /**
    * @param {ConstructorParameters<typeof Connection>[0]} options
@@ -62,4 +65,14 @@ module.exports = class ConnectionPool {
   async destroy() {
     await Promise.all(this.map(c => c.disconnect()))
   }
+
+  /**
+   * @param {number} [index=DEFAULT_CONNECTION] Pool slot to abort
+   */
+  abortConnection(index = DEFAULT_CONNECTION) {
+    const connection = this.pool[index]
+    if (connection) connection.abort()
+  }
 }
+
+module.exports.DEFAULT_CONNECTION = DEFAULT_CONNECTION
