@@ -195,10 +195,12 @@ describe('Network > Connection', () => {
       const protocol = apiVersions()
       connection = new Connection(connectionOpts({ maxInFlightRequests: 2 }))
       const originalProcessData = connection.processData
+      // The delayed response can land after a later test has reassigned `connection`.
+      const delayedConnection = connection
 
-      connection.processData = async data => {
+      delayedConnection.processData = async data => {
         await sleep(100)
-        originalProcessData.apply(connection, [data])
+        originalProcessData.apply(delayedConnection, [data])
       }
 
       await connection.connect()
@@ -229,10 +231,12 @@ describe('Network > Connection', () => {
         })
       )
       const originalProcessData = connection.processData
+      // The delayed response can land after a later test has reassigned `connection`.
+      const delayedConnection = connection
 
-      connection.processData = async data => {
+      delayedConnection.processData = async data => {
         await sleep(100)
-        originalProcessData.apply(connection, [data])
+        originalProcessData.apply(delayedConnection, [data])
       }
 
       await connection.connect()
